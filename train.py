@@ -1,24 +1,27 @@
 import matplotlib.pyplot as plt
 from config import *
-from uav_env import UAVInterceptEnv
+from uav_intercept_env import UAVInterceptEnv
 from dql_agent import DQNAgent
 import numpy as np
 
 def plot_trajectory(env, title):
     traj = env.get_trajectory()
-    users = env.get_users()
-    
-    cluster_centers = [np.mean(np.array(cluster), axis=0) for cluster in env.users]
-
+    connections = env.get_connections()
+    su_nodes = np.array(env.su_nodes)
+    du_nodes = np.array(env.du_nodes)
     plt.figure(figsize=(6, 6))
-    plt.scatter(users[:, 0], users[:, 1], c='blue', marker='o', label='Users')
-    plt.plot(traj[:, 0], traj[:, 1], c='red', marker='x', label='UAV path')
-    plt.scatter([traj[0, 0]], [traj[0, 1]], c='green', s=100, label='Start')
-    plt.scatter([traj[-1, 0]], [traj[-1, 1]], c='black', s=100, label='End')
-    plt.scatter([env.destination[0]], [env.destination[1]], c='orange', s=150, marker='*', label='Destination')
-    for i, center in enumerate(cluster_centers):
-        circle = plt.Circle((center[0], center[1]), CLUSTER_DRAW_RADIUS, color='purple', fill=False, linestyle='--', linewidth=2, label='Cluster' if i==0 else None)
-        plt.gca().add_patch(circle)
+    for idx, conn in enumerate(connections):
+        x = [conn[0], conn[2]]
+        y = [conn[1], conn[3]]
+        if idx == 0:
+            plt.plot(x, y, c='blue', linestyle='--', alpha=0.7, label='SU-DU', zorder=1)
+        else:
+            plt.plot(x, y, c='blue', linestyle='--', alpha=0.7, zorder=1)
+    plt.scatter(su_nodes[:, 0], su_nodes[:, 1], c='orange', s=120, marker='s', edgecolors='black', label='SU', zorder=3)
+    plt.scatter(du_nodes[:, 0], du_nodes[:, 1], c='purple', s=120, marker='o', edgecolors='black', label='DU', zorder=3)
+    plt.plot(traj[:, 0], traj[:, 1], c='red', marker='x', label='UAV path', zorder=2)
+    plt.scatter([traj[0, 0]], [traj[0, 1]], c='green', s=150, label='Start', zorder=4)
+    plt.scatter([traj[-1, 0]], [traj[-1, 1]], c='black', s=150, label='End', zorder=4)
     plt.title(f"UAV Trajectory - {title}")
     plt.xlabel("X Position")
     plt.ylabel("Y Position")
@@ -27,13 +30,13 @@ def plot_trajectory(env, title):
     plt.show()
 
 def train_agent(agent_class, episodes=EPISODES):
-    env = UAVEnv()
-    agent = agent_class(state_dim=2, action_dim=len(ACTIONS))
+    env = UAVInterceptEnv()
+    state = env.reset()
+    agent = agent_class(state_dim=len(state), action_dim=len(ACTIONS))
     rewards_history = []
     best_reward = -float('inf')
     best_trajectory = None
-    best_users = None
-    best_destination = None
+
     epsilon = EPSILON
     min_epsilon = 0.05
     decay = 0.995
@@ -42,7 +45,7 @@ def train_agent(agent_class, episodes=EPISODES):
         state = env.reset()
         total_reward = 0
         agent.epsilon = epsilon 
-        for _ in range(MAX_STEPS):
+        for _ in range(env.max_steps):
             action = agent.act(state)
             next_state, reward, done = env.step(action)
             agent.memory.push(state, action, reward, next_state, int(done))
@@ -57,8 +60,7 @@ def train_agent(agent_class, episodes=EPISODES):
         if total_reward > best_reward:
             best_reward = total_reward
             best_trajectory = env.get_trajectory().copy()
-            best_users = env.get_users().copy()
-            best_destination = env.destination.copy()
+            best_connections = env.get_connections().copy()
         
         if epsilon > min_epsilon:
             epsilon *= decay
@@ -71,18 +73,15 @@ def train_agent(agent_class, episodes=EPISODES):
     plt.title(f"{agent_class.__name__} Reward")
     plt.show()
 
-    def plot_best_trajectory(traj, users, destination, title):
-        clusters = best_users.reshape(NUM_CLUSTERS, USERS_PER_CLUSTER, 2)
-        cluster_centers = [np.mean(cluster, axis=0) for cluster in clusters]
+    def plot_best_trajectory(traj, connections, title):
         plt.figure(figsize=(6, 6))
-        plt.scatter(users[:, 0], users[:, 1], c='blue', marker='o', label='Users')
+        for conn in connections:
+            x = [conn[0], conn[2]]
+            y = [conn[1], conn[3]]
+            plt.plot(x, y, c='blue', linestyle='--', alpha=0.5, label='SU-DU')        
         plt.plot(traj[:, 0], traj[:, 1], c='red', marker='x', label='UAV path')
         plt.scatter([traj[0, 0]], [traj[0, 1]], c='green', s=100, label='Start')
         plt.scatter([traj[-1, 0]], [traj[-1, 1]], c='black', s=100, label='End')
-        plt.scatter([destination[0]], [destination[1]], c='orange', s=150, marker='*', label='Destination')
-        for i, center in enumerate(cluster_centers):
-            circle = plt.Circle((center[0], center[1]), CLUSTER_DRAW_RADIUS, color='purple', fill=False, linestyle='--', linewidth=2, label='Cluster' if i==0 else None)
-            plt.gca().add_patch(circle)
         plt.title(f"UAV Trajectory (Best Reward) - {title}\nMax Reward: {best_reward:.2f}")
         plt.xlabel("X Position")
         plt.ylabel("Y Position")
@@ -91,7 +90,7 @@ def train_agent(agent_class, episodes=EPISODES):
         plt.show()
 
     if best_trajectory is not None:
-        plot_best_trajectory(best_trajectory, best_users, best_destination, agent_class.__name__)
+        plot_best_trajectory(best_trajectory, best_connections, agent_class.__name__)
     else:
         print("No valid trajectory found.")
 
