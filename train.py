@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 from config import *
-from uav_env import UAVEnv
+from uav_env import UAVInterceptEnv
 from dql_agent import DQNAgent
 import numpy as np
 
