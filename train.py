@@ -38,7 +38,7 @@ def train_agent(agent_class, episodes=EPISODES):
     best_trajectory = None
 
     epsilon = EPSILON
-    min_epsilon = 0.05
+    min_epsilon = 0.02
     decay = 0.995
 
     for ep in range(episodes):
@@ -47,8 +47,16 @@ def train_agent(agent_class, episodes=EPISODES):
         agent.epsilon = epsilon 
         for _ in range(env.max_steps):
             action = agent.act(state)
+            if not (0 <= action < len(ACTIONS)):
+                print(f"[ERROR] Action out of range: {action}, valid range: 0-{len(ACTIONS)-1}")
             next_state, reward, done = env.step(action)
-            agent.memory.push(state, action, reward, next_state, int(done))
+            state_flat = np.array(state, dtype=np.float32).flatten()
+            next_state_flat = np.array(next_state, dtype=np.float32).flatten()
+            if state_flat.shape[0] != agent.state_dim or next_state_flat.shape[0] != agent.state_dim:
+                print(f"[ERROR] State shape: {state_flat.shape}, Next state shape: {next_state_flat.shape}")
+                continue
+            action = max(0, min(action, agent.action_dim - 1))
+            agent.memory.push(state_flat, action, reward, next_state_flat, int(done))
             agent.train()
             state = next_state
             total_reward += reward
@@ -75,10 +83,14 @@ def train_agent(agent_class, episodes=EPISODES):
 
     def plot_best_trajectory(traj, connections, title):
         plt.figure(figsize=(6, 6))
+        su_nodes = np.array(env.su_nodes)
+        du_nodes = np.array(env.du_nodes)
         for conn in connections:
             x = [conn[0], conn[2]]
             y = [conn[1], conn[3]]
-            plt.plot(x, y, c='blue', linestyle='--', alpha=0.5, label='SU-DU')        
+            plt.plot(x, y, c='blue', linestyle='--', alpha=0.5)
+        plt.scatter(su_nodes[:, 0], su_nodes[:, 1], c='orange', s=80, marker='s', edgecolors='black', label='SU', zorder=3)
+        plt.scatter(du_nodes[:, 0], du_nodes[:, 1], c='purple', s=80, marker='o', edgecolors='black', label='DU', zorder=3)
         plt.plot(traj[:, 0], traj[:, 1], c='red', marker='x', label='UAV path')
         plt.scatter([traj[0, 0]], [traj[0, 1]], c='green', s=100, label='Start')
         plt.scatter([traj[-1, 0]], [traj[-1, 1]], c='black', s=100, label='End')
@@ -97,4 +109,8 @@ def train_agent(agent_class, episodes=EPISODES):
 if __name__ == "__main__":
     print("Training DQN...")
     train_agent(DQNAgent)
+
+
+
+
 
