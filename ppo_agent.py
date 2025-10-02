@@ -12,9 +12,9 @@ def mlp(x, sizes, activation=tf.nn.relu, last_activation=None):
 class PPOIntercept:
     def __init__(self, state_dim, action_dim,
                  pi_sizes=(256,256), vf_sizes=(256,256),
-                 clip_ratio=0.2, pi_lr=5e-5, vf_lr=1e-3,
-                 train_pi_iters=20, train_v_iters=20,
-                 lam=0.95, max_grad_norm=0.5, entropy_coef=0.08, seed=SEED):
+                 clip_ratio=0.2, pi_lr=1e-3, vf_lr=1e-3,
+                 train_pi_iters=80, train_v_iters=40,
+                 lam=0.95, max_grad_norm=0.5, entropy_coef=0.18, seed=SEED):
         self.state_dim = state_dim
         self.action_dim = action_dim
         tf.set_random_seed(seed)
@@ -80,10 +80,10 @@ class PPOIntercept:
     def act(self, state):
         pi, v = self.sess.run([self.pi, self.v], {self.obs_ph: [state]})
         probs = pi[0]
-        if np.random.rand() < 0.8:
+        if np.random.rand() < 0.5:
             a = np.argmax(probs)  # greedy
         else:
-            a = np.random.choice(self.action_dim, p=probs)  # random
+            a = np.random.choice(self.action_dim, p=probs)  # sample
         logp = math.log(max(probs[a], 1e-8))
         return int(a), float(logp), float(v[0])
 
@@ -93,7 +93,7 @@ class PPOIntercept:
 
     def update(self, obs, act, adv, ret, logp_old):
         # chuẩn hóa advantage
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-5)
 
         feed = {
             self.obs_ph: obs,

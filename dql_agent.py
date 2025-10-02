@@ -10,23 +10,46 @@ class DQNAgent:
         self.action_dim = action_dim
         self.gamma = GAMMA
         self.epsilon = EPSILON
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
         self.lr = LEARNING_RATE
         self.batch_size = BATCH_SIZE
         self.memory = ReplayBuffer()
+        self.target_update_freq = 50
+        self.training_step = 0
         self._build_model()
 
     def _build_model(self):
+        # Main Q-Network
         self.states = tf.placeholder(tf.float32, [None, self.state_dim])
-        self.targets = tf.placeholder(tf.float32, [None, self.action_dim])  #Truyền vào mạng Q mục tiêu
+        self.targets = tf.placeholder(tf.float32, [None, self.action_dim])
+        
+        with tf.variable_scope('main_network'):
+            fc1 = tf.layers.dense(self.states, 128, activation=tf.nn.relu, name='fc1')
+            fc2 = tf.layers.dense(fc1, 128, activation=tf.nn.relu, name='fc2')
+            fc3 = tf.layers.dense(fc2, 64, activation=tf.nn.relu, name='fc3')
+            self.q_values = tf.layers.dense(fc3, self.action_dim, name='q_values')
 
-        fc1 = tf.layers.dense(self.states, 64, activation=tf.nn.relu)
-        fc2 = tf.layers.dense(fc1, 64, activation=tf.nn.relu)
-        self.q_values = tf.layers.dense(fc2, self.action_dim)
+        # Target Q-Network (separate network)
+        with tf.variable_scope('target_network'):
+            target_fc1 = tf.layers.dense(self.states, 128, activation=tf.nn.relu, name='fc1')
+            target_fc2 = tf.layers.dense(target_fc1, 128, activation=tf.nn.relu, name='fc2')
+            target_fc3 = tf.layers.dense(target_fc2, 64, activation=tf.nn.relu, name='fc3')
+            self.target_q_values = tf.layers.dense(target_fc3, self.action_dim, name='q_values')
 
+        # Loss and optimizer
         self.loss = tf.reduce_mean(tf.square(self.targets - self.q_values))
         self.optimizer = tf.train.AdamOptimizer(self.lr).minimize(self.loss)
+        
+        # Target network update operation
+        main_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='main_network')
+        target_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='target_network')
+        self.update_target = [target_vars[i].assign(main_vars[i]) for i in range(len(main_vars))]
+        
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
+        # Initialize target network with main network weights
+        self.sess.run(self.update_target)
 
     def act(self, state):
         if np.random.rand() < self.epsilon:
@@ -36,12 +59,30 @@ class DQNAgent:
         return np.argmax(q_vals[0])
 
     def train(self):
-        if len(self.memory) < self.batch_size:  #Do ban đầu chưa thử sai nên memory batch rỗng nên chưa train()
+        if len(self.memory) < self.batch_size:
             return
         
         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
-        q_next = self.sess.run(self.q_values, {self.states: next_states})
-        q_target = self.sess.run(self.q_values, {self.states: states})
+        
+        # Use target network for stable Q-targets
+        target_q_values = self.sess.run(self.target_q_values, {self.states: next_states})
+        current_q_values = self.sess.run(self.q_values, {self.states: states})
+        
+        # Compute target Q-values
+        targets = current_q_values.copy()
         for i in range(self.batch_size):
-            q_target[i, actions[i]] = rewards[i] + (1 - dones[i]) * self.gamma * np.max(q_next[i])
-        self.sess.run(self.optimizer, {self.states: states, self.targets: q_target})
+            if dones[i]:
+                targets[i, actions[i]] = rewards[i]
+            else:
+                targets[i, actions[i]] = rewards[i] + self.gamma * np.max(target_q_values[i])
+        
+        # Train the main network
+        self.sess.run(self.optimizer, {self.states: states, self.targets: targets})
+        
+        # Update target network periodically
+        self.training_step += 1
+        if self.training_step % self.target_update_freq == 0:
+            self.sess.run(self.update_target)
+        
+        # Decay epsilon (disabled to let training script handle it)
+        pass
