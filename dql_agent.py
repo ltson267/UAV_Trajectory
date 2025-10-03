@@ -10,12 +10,12 @@ class DQNAgent:
         self.action_dim = action_dim
         self.gamma = GAMMA
         self.epsilon = EPSILON
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        self.lr = LEARNING_RATE
+        self.epsilon_min = 0.05    # Lower minimum for better exploitation
+        self.epsilon_decay = 0.995  # Slower decay for sustained learning
+        self.lr = 0.001          # Reduced for more stable learning
         self.batch_size = BATCH_SIZE
         self.memory = ReplayBuffer()
-        self.target_update_freq = 50
+        self.target_update_freq = 100    # Update every step for maximum adaptability
         self.training_step = 0
         self._build_model()
 
@@ -79,7 +79,7 @@ class DQNAgent:
         # Train the main network
         self.sess.run(self.optimizer, {self.states: states, self.targets: targets})
         
-        # Update target network periodically
+        # Update target network periodically (less frequently to prevent forgetting)
         self.training_step += 1
         if self.training_step % self.target_update_freq == 0:
             self.sess.run(self.update_target)

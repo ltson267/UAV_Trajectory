@@ -96,49 +96,18 @@ class UAVInterceptEnv:
                 self.last_positions.pop(0)
             self.last_positions.append(self.uav_pos.copy())
 
-            # Exploration bonus for visiting new positions
-            pos_key = (round(self.uav_pos[0]), round(self.uav_pos[1]))
-            if pos_key not in self.visited_positions:
-                self.visited_positions.add(pos_key)
-                reward += 0.1  # Small bonus for exploration
-
-            # Enhanced reward for efficient trajectory
-            trajectory_efficiency_bonus = self._calculate_trajectory_efficiency()
-            reward += trajectory_efficiency_bonus * 0.5
-
-            # Reward for moving closer to uncollected targets with priority to nearest target
-            uncollected_connections = [(i, conn) for i, conn in enumerate(self.connections) if self.collected[i] == 0]
-            if uncollected_connections:
-                # Find the nearest uncollected target
-                nearest_idx, nearest_dist = min(
-                    [(i, self._point_to_segment_dist(self.uav_pos, su, du)) for i, (su, du) in uncollected_connections],
-                    key=lambda x: x[1]
-                )
-
-                old_dist = self._point_to_segment_dist(old_pos, *self.connections[nearest_idx])
-                new_dist = nearest_dist
-
-                if new_dist < old_dist:
-                    # Scale reward by distance improvement and prioritize nearest target
-                    improvement = old_dist - new_dist
-                    # Higher reward for moving toward nearest target
-                    reward += 2.0 * improvement * (1.0 + 2.0 / (new_dist + 1.0))
+            # Increased movement penalty to encourage shorter paths
+            reward -= 0.5
                         
         elif action == "hover" and self.battery_level > 0:
             self.battery_level -= HOVER_DECAY
             hover_on_collected = False
-            efficient_hover = False
 
             for i, (su, du) in enumerate(self.connections):
                 dist = self._point_to_segment_dist(self.uav_pos, su, du)
                 if dist < 1.5 and self.collected[i] == 0:
-                    # Check if this is an efficient hover (first time or after collecting others)
-                    if self.hover_count[i] == 0 or collected_this_step > 0:
-                        reward += 50  # Reward for collection
-                        efficient_hover = True
-                    else:
-                        reward += 30  # Reduced reward for repeated hovering
-
+                    # High collection reward to strongly encourage collecting
+                    reward += 200
                     self.collected[i] = 1
                     self.hover_count[i] += 1
                     collected_this_step += 1
@@ -146,87 +115,72 @@ class UAVInterceptEnv:
                     hover_on_collected = True
                     self.hover_count[i] += 1
 
-            # Penalty for hovering on already collected connections (increased based on hover count)
+            # Reduced penalty for hovering on already collected connections
             if hover_on_collected:
-                # Get the maximum hover count among collected connections being hovered
-                max_hover_on_collected = max([self.hover_count[i] for i, (_, _) in enumerate(self.connections)
-                                            if self.collected[i] == 1 and self._point_to_segment_dist(self.uav_pos, *self.connections[i]) < 1.5], default=0)
-                reward -= 5.0 * (1 + max_hover_on_collected)  # Increased penalty based on repeated hovering
+                reward -= 5  # Reduced penalty for hovering on collected
 
-            # Penalty for inefficient hover (no collection and not on collected connection)
-            if collected_this_step == 0 and not hover_on_collected:
-                # Check if UAV is close to any uncollected connection but not collecting
-                close_to_uncollected = any(self._point_to_segment_dist(self.uav_pos, su, du) < 2.0
-                                         for i, (su, du) in enumerate(self.connections) if self.collected[i] == 0)
-                if close_to_uncollected:
-                    reward -= 3.0  # Penalty for inefficient hover when close to target
-                else:
-                    reward -= 1.0  # Small penalty for hovering far from targets
+            # Penalty for inefficient hover (no collection)
+            if collected_this_step == 0:
+                reward -= 2  # Reduced penalty for hovering without collecting
 
-        # Optimized reward structure for trajectory efficiency
-        # Small time penalty
-        reward -= 0.1
+        # Simplified reward structure focused on battery and trajectory efficiency
 
-        # Reduced bonus for multiple collections in one step (encourage sequential collection)
-        if collected_this_step > 1:
-            reward += 10 * (collected_this_step - 1)  # Further reduced bonus
-
-        # Progress bonus with emphasis on trajectory efficiency
+        # Increased progress bonus - encourage steady progress
         current_progress = np.sum(self.collected) / len(self.collected)
         if current_progress > previous_collected / len(self.collected):
-            # Base progress bonus
-            base_bonus = 3 * current_progress
-            # Additional bonus for efficient trajectory
-            trajectory_bonus = self._calculate_trajectory_efficiency() * 5
-            reward += base_bonus + trajectory_bonus
+            reward += 15 * current_progress  # Increased bonus for making progress
 
-        # Enhanced completion bonus based on trajectory efficiency
+        # Battery efficiency bonus - reward for completing with high battery
         if np.all(self.collected == 1):
-            # Calculate trajectory efficiency for the entire path
-            total_efficiency = self._calculate_trajectory_efficiency()
-            # Bonus based on actual trajectory length (not just steps) and efficiency
-            actual_trajectory_length = self.get_trajectory_length()
-            # Normalize length bonus: shorter trajectories get higher bonus
-            length_bonus = max(0, 100 - actual_trajectory_length)  # Up to 100 bonus for short trajectories
-            efficiency_bonus = total_efficiency * 50  # Up to 50 bonus points for efficiency
-            completion_bonus = 150 + length_bonus + efficiency_bonus  # Base 150 + length + efficiency bonus
+            battery_efficiency = self.battery_level / 100.0  # Fraction of battery remaining
+            trajectory_length = self.get_trajectory_length()
+
+            # Increased completion reward for better learning
+            base_completion = 150
+
+            # Battery efficiency bonus (up to 50 points for saving battery)
+            battery_bonus = battery_efficiency * 50
+
+            # Trajectory length bonus (shorter trajectory = higher bonus)
+            # Optimal trajectory length is roughly 20-30, so bonus for < 40
+            length_bonus = max(0, 40 - trajectory_length) * 2
+
+            # Hover efficiency bonus (reward for efficient hovering)
+            hover_efficiency = self.get_hover_efficiency()
+            hover_bonus = hover_efficiency * 30
+
+            completion_bonus = base_completion + battery_bonus + length_bonus + hover_bonus
             reward += completion_bonus
         
-        # Reduced penalty for timeout
+        # Reduced penalties to prevent agent collapse
         if self.steps >= self.max_steps - 1 and not np.all(self.collected == 1):
-            reward -= 50  # Increased penalty
+            reward -= 20  # Reduced penalty for not completing in time
 
-        # Penalty for battery depletion
-        if self.battery_level <= 0:
-            reward -= 30  # Increased penalty
+        # Penalty for battery depletion - only if not completed
+        if self.battery_level <= 0 and not np.all(self.collected == 1):
+            reward -= 10  # Reduced penalty for running out of battery
             self.battery_level = 0
 
         self.steps += 1
         self.trajectory.append(self.uav_pos.copy())
+
+        # Debug: Check if agent is stuck or not learning
+        completed_all = np.all(self.collected == 1)
+        if self.steps > 100 and not completed_all:
+            # Agent taking too long, give hint
+            reward -= 1  # Small penalty for taking too long
+
         done = self.is_done() or self.battery_level <= 0
         return self.get_state(), reward, done
 
     def _calculate_trajectory_efficiency(self):
-        """Calculate trajectory efficiency bonus based on recent movement pattern"""
+        """Calculate battery efficiency for recent trajectory"""
         if len(self.last_positions) < 3:
             return 0.0
 
-        # Calculate total distance traveled in recent steps
-        total_distance = 0
-        for i in range(1, len(self.last_positions)):
-            total_distance += np.linalg.norm(self.last_positions[i] - self.last_positions[i-1])
-
-        # Calculate straight-line distance from start to end of recent positions
-        start_pos = self.last_positions[0]
-        end_pos = self.last_positions[-1]
-        straight_distance = np.linalg.norm(end_pos - start_pos)
-
-        # Efficiency is how much progress we made relative to distance traveled
-        if total_distance > 0:
-            efficiency = straight_distance / total_distance
-            # Bonus for efficient movement (close to straight line)
-            return min(efficiency * 0.5, 0.5)  # Cap at 0.5 bonus
-        return 0.0
+        # For now, return simple efficiency based on battery level
+        # This encourages completing with high battery
+        return self.battery_level / 100.0
 
     def _point_to_segment_dist(self, p, a, b):
         ap = p - a
@@ -252,12 +206,21 @@ class UAVInterceptEnv:
         return total_length
 
     def get_hover_efficiency(self):
-        """Calculate hover efficiency (less hovers per connection is better)"""
+        """Calculate hover efficiency (optimal is 1 hover per connection)"""
         if len(self.connections) == 0:
             return 1.0
-        avg_hover_count = np.mean(self.hover_count)
-        # Efficiency decreases as hover count increases
-        return 1.0 / (1.0 + avg_hover_count)
+
+        # Perfect efficiency: 1 hover per connection
+        # Efficiency decreases as hover count increases beyond 1
+        total_excess_hovers = sum(max(0, count - 1) for count in self.hover_count)
+        max_possible_excess = len(self.connections) * 2  # Assume max 3 hovers per connection
+
+        if max_possible_excess == 0:
+            return 1.0
+
+        # Return efficiency as fraction of excess hovers (cap at 0 to avoid negative values)
+        efficiency = 1.0 - (total_excess_hovers / max_possible_excess)
+        return max(0.0, efficiency)  # Ensure non-negative efficiency
 
     def get_connections(self):
         return np.array([np.concatenate([su, du]) for su, du in self.connections])
