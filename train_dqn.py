@@ -26,8 +26,8 @@ def train_dqn(episodes=EPISODES):
     best_connections = None
 
     epsilon = EPSILON
-    min_epsilon = 0.2
-    decay = 0.999
+    min_epsilon = 0.1  # Lower minimum for better exploitation later
+    decay = 0.997      # Slower decay for sustained exploration
 
     for ep in range(episodes):
         state = env.reset()
@@ -106,13 +106,18 @@ def train_dqn(episodes=EPISODES):
             epsilon *= decay
             epsilon = max(epsilon, min_epsilon)
 
-        # Early stopping
-        if len(moving_avg_rewards) >= 200 and moving_avg_rewards[-1] > 1000:
+        # Early stopping - adjusted thresholds for new reward system
+        if len(moving_avg_rewards) >= 200:
+            recent_avg = moving_avg_rewards[-1]
+            recent_completion = np.mean(completion_rate[-100:]) if len(completion_rate) >= 100 else 0
             recent_efficiency = np.mean(hover_efficiencies[-50:]) if len(hover_efficiencies) >= 50 else 0
             recent_length = np.mean(trajectory_lengths[-50:]) if len(trajectory_lengths) >= 50 else float('inf')
 
-            if recent_efficiency > 0.8 and recent_length < 50:
+            # Success criteria: good completion rate, good efficiency, reasonable path length
+            if recent_avg > 300 and recent_completion > 0.9 and recent_efficiency > 0.75 and recent_length < 40:
                 print(f"[DQN] Early stopping at episode {ep+1} - Good performance achieved!")
+                print(f"       Avg Reward: {recent_avg:.2f}, Completion: {recent_completion:.2%}, "
+                      f"Efficiency: {recent_efficiency:.2f}, Length: {recent_length:.1f}")
                 break
 
     # Plotting
