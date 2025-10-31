@@ -10,12 +10,12 @@ class DQNAgent:
         self.action_dim = action_dim
         self.gamma = GAMMA
         self.epsilon = EPSILON
-        self.epsilon_min = 0.05    # Lower minimum for better exploitation
-        self.epsilon_decay = 0.995  # Slower decay for sustained learning
-        self.lr = 0.001          # Reduced for more stable learning
+        self.epsilon_min = 0.05
+        self.epsilon_decay = 0.995
+        self.lr = 0.0005         # Lower LR for more stable learning
         self.batch_size = BATCH_SIZE
         self.memory = ReplayBuffer()
-        self.target_update_freq = 100    # Update every step for maximum adaptability
+        self.target_update_freq = 200  # Less frequent updates for stability
         self.training_step = 0
         self._build_model()
 
@@ -25,16 +25,22 @@ class DQNAgent:
         self.targets = tf.placeholder(tf.float32, [None, self.action_dim])
         
         with tf.variable_scope('main_network'):
-            fc1 = tf.layers.dense(self.states, 128, activation=tf.nn.relu, name='fc1')
-            fc2 = tf.layers.dense(fc1, 128, activation=tf.nn.relu, name='fc2')
-            fc3 = tf.layers.dense(fc2, 64, activation=tf.nn.relu, name='fc3')
+            fc1 = tf.layers.dense(self.states, 256, activation=tf.nn.relu, 
+                                 kernel_initializer=tf.keras.initializers.he_normal(), name='fc1')
+            fc2 = tf.layers.dense(fc1, 128, activation=tf.nn.relu,
+                                 kernel_initializer=tf.keras.initializers.he_normal(), name='fc2')
+            fc3 = tf.layers.dense(fc2, 64, activation=tf.nn.relu,
+                                 kernel_initializer=tf.keras.initializers.he_normal(), name='fc3')
             self.q_values = tf.layers.dense(fc3, self.action_dim, name='q_values')
 
         # Target Q-Network (separate network)
         with tf.variable_scope('target_network'):
-            target_fc1 = tf.layers.dense(self.states, 128, activation=tf.nn.relu, name='fc1')
-            target_fc2 = tf.layers.dense(target_fc1, 128, activation=tf.nn.relu, name='fc2')
-            target_fc3 = tf.layers.dense(target_fc2, 64, activation=tf.nn.relu, name='fc3')
+            target_fc1 = tf.layers.dense(self.states, 256, activation=tf.nn.relu,
+                                        kernel_initializer=tf.keras.initializers.he_normal(), name='fc1')
+            target_fc2 = tf.layers.dense(target_fc1, 128, activation=tf.nn.relu,
+                                        kernel_initializer=tf.keras.initializers.he_normal(), name='fc2')
+            target_fc3 = tf.layers.dense(target_fc2, 64, activation=tf.nn.relu,
+                                        kernel_initializer=tf.keras.initializers.he_normal(), name='fc3')
             self.target_q_values = tf.layers.dense(target_fc3, self.action_dim, name='q_values')
 
         # Loss and optimizer

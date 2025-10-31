@@ -1,6 +1,7 @@
 import numpy as np
 import random
 from config import *
+from signal_model import SignalModel
 
 class UAVInterceptEnv:
     def __init__(self):
@@ -17,6 +18,7 @@ class UAVInterceptEnv:
         self.connections = []
         self.su_nodes = []
         self.du_nodes = []
+        self.signal_model = SignalModel()  # Initialize signal model
         self._generate_connections()
         self.reset()
 
@@ -65,21 +67,16 @@ class UAVInterceptEnv:
     def step(self, action_idx):
         action = self.actions[action_idx]
         previous_collected = np.sum(self.collected)
+        old_pos = self.uav_pos.copy()
         
-        # Điều chỉnh move_step theo battery (50/25/0 thresholds for battery=100)
-        if self.battery_level >= 50:
-            move_step = 1.0
-        elif self.battery_level >= 25:
-            move_step = 0.5
-        else:
-            move_step = 0.25
+        # Simplified movement - constant step size
+        move_step = 1.0
 
         reward = 0
         collected_this_step = 0
 
         # Movement và battery consumption
         if action in ["left", "right", "forward", "backward"] and self.battery_level > 0:
-            old_pos = self.uav_pos.copy()
             if action == "left":
                 self.uav_pos[0] = max(0, self.uav_pos[0] - move_step)
             elif action == "right":
@@ -89,86 +86,99 @@ class UAVInterceptEnv:
             elif action == "backward":
                 self.uav_pos[1] = max(0, self.uav_pos[1] - move_step)
 
-            self.battery_level -= move_step * MOVE_DECAY
+            self.battery_level -= MOVE_DECAY
 
             # Track trajectory efficiency
             if len(self.last_positions) >= 5:
                 self.last_positions.pop(0)
             self.last_positions.append(self.uav_pos.copy())
 
-            # Increased movement penalty to encourage shorter paths
-            reward -= 0.5
+            # Movement penalty to encourage efficiency
+            reward -= 0.1
+            
+            # Throughput-based reward shaping - reward for moving to higher throughput areas
+            for i, (su, du) in enumerate(self.connections):
+                if self.collected[i] == 0:
+                    movement_reward = self.signal_model.calculate_reward_for_movement(
+                        old_pos, self.uav_pos, i, self.connections)
+                    reward += movement_reward
                         
         elif action == "hover" and self.battery_level > 0:
             self.battery_level -= HOVER_DECAY
+            collected_this_step = 0
             hover_on_collected = False
 
             for i, (su, du) in enumerate(self.connections):
-                dist = self._point_to_segment_dist(self.uav_pos, su, du)
-                if dist < 1.5 and self.collected[i] == 0:
-                    # High collection reward to strongly encourage collecting
-                    reward += 200
-                    self.collected[i] = 1
+                if self.collected[i] == 0:  # Chỉ kiểm tra các kết nối chưa thu thập
+                    throughput = self.signal_model.get_throughput_at_position(
+                        self.uav_pos, i, self.connections)
+
+                    if self.signal_model.can_collect_signal(throughput):
+                        # Collection reward
+                        reward += 100
+                        self.collected[i] = 1
+                        self.hover_count[i] += 1
+                        collected_this_step += 1
+                    else:
+                        # Penalty cho hover không hiệu quả
+                        reward -= 5
+                        self.hover_count[i] += 1
+                elif self.collected[i] == 1:
+                    # Penalty cho hover trên đã thu thập
+                    reward -= 15
                     self.hover_count[i] += 1
-                    collected_this_step += 1
-                elif dist < 1.5 and self.collected[i] == 1:
-                    hover_on_collected = True
-                    self.hover_count[i] += 1
 
-            # Reduced penalty for hovering on already collected connections
-            if hover_on_collected:
-                reward -= 5  # Reduced penalty for hovering on collected
-
-            # Penalty for inefficient hover (no collection)
-            if collected_this_step == 0:
-                reward -= 2  # Reduced penalty for hovering without collecting
-
-        # Simplified reward structure focused on battery and trajectory efficiency
-
-        # Increased progress bonus - encourage steady progress
+        # Progress reward - scaled by number of collections
         current_progress = np.sum(self.collected) / len(self.collected)
         if current_progress > previous_collected / len(self.collected):
-            reward += 15 * current_progress  # Increased bonus for making progress
+            # Progressive bonus that increases with more collections
+            progress_bonus = 20 + (current_progress * 30)
+            reward += progress_bonus
 
-        # Battery efficiency bonus - reward for completing with high battery
+        # Completion bonus - reward for completing all tasks
         if np.all(self.collected == 1):
-            battery_efficiency = self.battery_level / 100.0  # Fraction of battery remaining
+            battery_efficiency = self.battery_level / 100.0
             trajectory_length = self.get_trajectory_length()
-
-            # Increased completion reward for better learning
-            base_completion = 150
-
-            # Battery efficiency bonus (up to 50 points for saving battery)
-            battery_bonus = battery_efficiency * 50
-
-            # Trajectory length bonus (shorter trajectory = higher bonus)
-            # Optimal trajectory length is roughly 20-30, so bonus for < 40
-            length_bonus = max(0, 40 - trajectory_length) * 2
-
-            # Hover efficiency bonus (reward for efficient hovering)
             hover_efficiency = self.get_hover_efficiency()
-            hover_bonus = hover_efficiency * 30
+
+            # Base completion reward
+            base_completion = 200
+
+            # Battery efficiency bonus (up to 100 points for high battery)
+            battery_bonus = battery_efficiency * 100
+
+            # Trajectory efficiency bonus (reward shorter paths)
+            # Ideal path is around 25-35 units for 5 connections
+            optimal_length = 30.0
+            if trajectory_length < optimal_length:
+                length_bonus = (optimal_length - trajectory_length) * 3
+            else:
+                length_bonus = max(0, (optimal_length - (trajectory_length - optimal_length) * 0.5))
+
+            # Hover efficiency bonus (reward efficient hovering)
+            hover_bonus = hover_efficiency * 50
 
             completion_bonus = base_completion + battery_bonus + length_bonus + hover_bonus
             reward += completion_bonus
         
-        # Reduced penalties to prevent agent collapse
-        if self.steps >= self.max_steps - 1 and not np.all(self.collected == 1):
-            reward -= 20  # Reduced penalty for not completing in time
+        # Time penalty - encourage faster completion
+        if self.steps > 50 and not np.all(self.collected == 1):
+            # Progressive time penalty
+            time_penalty = (self.steps - 50) * 0.05
+            reward -= min(time_penalty, 10)  # Cap at -10
 
-        # Penalty for battery depletion - only if not completed
-        if self.battery_level <= 0 and not np.all(self.collected == 1):
-            reward -= 10  # Reduced penalty for running out of battery
+        # Strong penalty for not completing
+        if self.steps >= self.max_steps - 1 and not np.all(self.collected == 1):
+            reward -= 50
+
+        # Penalty for battery depletion
+        if self.battery_level <= 0:
+            if not np.all(self.collected == 1):
+                reward -= 30
             self.battery_level = 0
 
         self.steps += 1
         self.trajectory.append(self.uav_pos.copy())
-
-        # Debug: Check if agent is stuck or not learning
-        completed_all = np.all(self.collected == 1)
-        if self.steps > 100 and not completed_all:
-            # Agent taking too long, give hint
-            reward -= 1  # Small penalty for taking too long
 
         done = self.is_done() or self.battery_level <= 0
         return self.get_state(), reward, done
