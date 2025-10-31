@@ -1,6 +1,7 @@
 import numpy as np
 import random
 from config import *
+from signal_model import SignalModel
 
 class UAVInterceptEnv:
     def __init__(self):
@@ -17,6 +18,7 @@ class UAVInterceptEnv:
         self.connections = []
         self.su_nodes = []
         self.du_nodes = []
+        self.signal_model = SignalModel()  # Initialize signal model
         self._generate_connections()
         self.reset()
 
@@ -94,55 +96,37 @@ class UAVInterceptEnv:
             # Movement penalty to encourage efficiency
             reward -= 0.1
             
-            # Distance-based reward shaping - reward for moving closer to uncollected connections
-            closest_uncollected_dist_before = float('inf')
-            closest_uncollected_dist_after = float('inf')
-            
+            # Throughput-based reward shaping - reward for moving to higher throughput areas
             for i, (su, du) in enumerate(self.connections):
                 if self.collected[i] == 0:
-                    # Distance to the midpoint of the connection
-                    midpoint = (su + du) / 2
-                    dist_before = np.linalg.norm(old_pos - midpoint)
-                    dist_after = np.linalg.norm(self.uav_pos - midpoint)
-                    
-                    closest_uncollected_dist_before = min(closest_uncollected_dist_before, dist_before)
-                    closest_uncollected_dist_after = min(closest_uncollected_dist_after, dist_after)
-            
-            # Reward shaping: encourage moving closer to targets
-            if closest_uncollected_dist_after < closest_uncollected_dist_before:
-                improvement = closest_uncollected_dist_before - closest_uncollected_dist_after
-                reward += improvement * 0.5  # Reward for getting closer
-            elif closest_uncollected_dist_after > closest_uncollected_dist_before:
-                worsening = closest_uncollected_dist_after - closest_uncollected_dist_before
-                reward -= worsening * 0.3  # Penalty for moving away
+                    movement_reward = self.signal_model.calculate_reward_for_movement(
+                        old_pos, self.uav_pos, i, self.connections)
+                    reward += movement_reward
                         
         elif action == "hover" and self.battery_level > 0:
             self.battery_level -= HOVER_DECAY
+            collected_this_step = 0
             hover_on_collected = False
-            hover_near_target = False
 
             for i, (su, du) in enumerate(self.connections):
-                dist = self._point_to_segment_dist(self.uav_pos, su, du)
-                
-                if dist < 1.5:
-                    hover_near_target = True
-                    if self.collected[i] == 0:
-                        # Collection reward - keep it significant but balanced
+                if self.collected[i] == 0:  # Chỉ kiểm tra các kết nối chưa thu thập
+                    throughput = self.signal_model.get_throughput_at_position(
+                        self.uav_pos, i, self.connections)
+
+                    if self.signal_model.can_collect_signal(throughput):
+                        # Collection reward
                         reward += 100
                         self.collected[i] = 1
                         self.hover_count[i] += 1
                         collected_this_step += 1
                     else:
-                        hover_on_collected = True
+                        # Penalty cho hover không hiệu quả
+                        reward -= 5
                         self.hover_count[i] += 1
-
-            # Strong penalty for hovering on already collected connections
-            if hover_on_collected:
-                reward -= 15
-
-            # Penalty for hovering not near any target
-            if not hover_near_target:
-                reward -= 10
+                elif self.collected[i] == 1:
+                    # Penalty cho hover trên đã thu thập
+                    reward -= 15
+                    self.hover_count[i] += 1
 
         # Progress reward - scaled by number of collections
         current_progress = np.sum(self.collected) / len(self.collected)

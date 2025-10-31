@@ -79,14 +79,8 @@ def train_dqn(episodes=EPISODES):
         hover_efficiencies.append(hover_efficiency)
         battery_levels.append(final_battery)
 
-        # Update best trajectory
-        current_length = env.get_trajectory_length()
-        current_efficiency = env.get_hover_efficiency()
-
-        length_score = 100 / (current_length + 1) if current_length > 0 else 100
-        current_score = total_reward + length_score + (current_efficiency * 50)
-
-        if total_reward > best_reward or (total_reward >= best_reward * 0.9 and current_score > best_reward):
+        # Update best trajectory (chỉ dựa trên reward thuần túy)
+        if total_reward > best_reward:
             best_reward = total_reward
             best_trajectory = env.get_trajectory().copy()
             best_connections = env.get_connections().copy()

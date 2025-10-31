@@ -125,7 +125,7 @@ def train_agent(agent_class, episodes=EPISODES):
         length_score = 100 / (current_length + 1) if current_length > 0 else 100
         current_score = total_reward + length_score + (current_efficiency * 50)
 
-        if total_reward > best_reward or (total_reward >= best_reward * 0.9 and current_score > best_reward):
+        if total_reward > best_reward:
             best_reward = total_reward
             best_trajectory = env.get_trajectory().copy()
             best_connections = env.get_connections().copy()
@@ -237,7 +237,9 @@ def train_agent(agent_class, episodes=EPISODES):
         'best_reward': best_reward,
         'completion_rate': np.mean(completion_rate),
         'avg_trajectory_length': np.mean(trajectory_lengths),
-        'avg_battery': np.mean(battery_levels)
+        'avg_battery': np.mean(battery_levels),
+        'best_trajectory_length': min(trajectory_lengths) if trajectory_lengths else None,
+        'best_battery': max(battery_levels) if battery_levels else None
     }
 
     def plot_best_trajectory(traj, connections, title):
@@ -289,8 +291,12 @@ def compare_agents():
     print(f"GreedyAgent   - Completion Rate: {greedy_results['completion_rate']:.2%}")
     print(f"DQN Agent     - Avg Trajectory Length: {dqn_results['avg_trajectory_length']:.1f}")
     print(f"GreedyAgent   - Trajectory Length: {greedy_results['trajectory_length']:.1f}")
+    if dqn_results['best_trajectory_length'] is not None:
+        print(f"DQN Agent     - Best Reward Trajectory Length: {dqn_results['best_trajectory_length']:.1f}")
     print(f"DQN Agent     - Avg Final Battery: {dqn_results['avg_battery']:.1f}")
     print(f"GreedyAgent   - Final Battery: {greedy_results['battery']:.1f}")
+    if dqn_results['best_battery'] is not None:
+        print(f"DQN Agent     - Best Reward Final Battery: {dqn_results['best_battery']:.1f}")
 
     if greedy_results['reward'] > dqn_results['best_reward']:
         print("\n🎉 GreedyAgent outperforms DQN Agent!")
@@ -332,6 +338,8 @@ def train_agent_with_env(agent_class, env):
     best_reward = -float('inf')
     best_trajectory = None
     best_connections = None
+    best_trajectory_length = None
+    best_battery = None
 
     # Chỉ sử dụng epsilon cho DQN agent
     epsilon = EPSILON if hasattr(agent, 'epsilon') else 1.0
@@ -399,17 +407,13 @@ def train_agent_with_env(agent_class, env):
         hover_efficiencies.append(hover_efficiency)
         battery_levels.append(final_battery)
 
-        # Update best trajectory
-        current_length = env.get_trajectory_length()
-        current_efficiency = env.get_hover_efficiency()
-
-        length_score = 100 / (current_length + 1) if current_length > 0 else 100
-        current_score = total_reward + length_score + (current_efficiency * 50)
-
-        if total_reward > best_reward or (total_reward >= best_reward * 0.9 and current_score > best_reward):
+        # Update best trajectory (chỉ dựa trên reward thuần túy)
+        if total_reward > best_reward:
             best_reward = total_reward
             best_trajectory = env.get_trajectory().copy()
             best_connections = env.get_connections().copy()
+            best_trajectory_length = env.get_trajectory_length()
+            best_battery = env.battery_level
 
         # Enhanced logging
         agent_type = "DQN" if hasattr(agent, 'memory') else "Greedy"
@@ -459,7 +463,9 @@ def train_agent_with_env(agent_class, env):
         'avg_trajectory_length': np.mean(trajectory_lengths),
         'avg_battery': np.mean(battery_levels),
         'best_trajectory': best_trajectory,
-        'best_connections': best_connections
+        'best_connections': best_connections,
+        'best_trajectory_length': best_trajectory_length,
+        'best_battery': best_battery
     }
 
 def test_greedy_agent_single(agent_class):
