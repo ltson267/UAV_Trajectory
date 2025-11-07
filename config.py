@@ -1,11 +1,11 @@
 GRID_SIZE = (20, 20)     # Lưới
 GAMMA = 0.99           
 EPSILON = 0.9           # Increased initial exploration
-EPSILON_MIN = 0.05      
-EPSILON_DECAY = 0.995   
+EPSILON_MIN = 0.1      
+EPSILON_DECAY = 0.997   
 BATCH_SIZE = 64         
 LEARNING_RATE = 0.001  
-EPISODES = 1000         # Increased for better convergence
+EPISODES = 800        # Increased for better convergence
 MAX_STEPS = 400         # Reduced to encourage efficiency
 ACTIONS = ["left", "right", "forward", "backward", "hover"]
 SEED = 42
