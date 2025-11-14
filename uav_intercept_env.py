@@ -61,7 +61,36 @@ class UAVInterceptEnv:
         return self.get_state()
 
     def get_state(self):
-        state = np.concatenate([self.uav_pos, [self.battery_level], self.collected], axis=0)
+        # Tính khoảng cách đến kết nối có SINR cao nhất chưa thu thập
+        max_sinr = -float('inf')
+        best_distance = float('inf')
+
+        for i, (su, du) in enumerate(self.connections):
+            if self.collected[i] == 0:  # Chỉ tính cho kết nối chưa thu thập
+                sinr = self.signal_model.calculate_sinr(self.uav_pos, i, self.connections)
+                if sinr > max_sinr:
+                    max_sinr = sinr
+                    best_distance = self._point_to_segment_dist(self.uav_pos, su, du)
+
+        # Nếu không có kết nối nào chưa thu thập, set khoảng cách = 0
+        if max_sinr == -float('inf'):
+            best_distance = 0.0
+
+        # Thêm vector tương đối đến điểm gần nhất trên các kết nối chưa thu thập
+        relative_vectors = []
+        for i, (su, du) in enumerate(self.connections):
+            if self.collected[i] == 0:  # Chỉ cho kết nối chưa thu thập
+                # Tìm điểm gần nhất trên segment
+                closest_point = self._get_closest_point_on_segment(self.uav_pos, su, du)
+                # Tính vector tương đối từ UAV đến điểm đó
+                dx = closest_point[0] - self.uav_pos[0]
+                dy = closest_point[1] - self.uav_pos[1]
+                relative_vectors.extend([dx, dy])
+            else:
+                # Cho kết nối đã thu thập, set vector về 0
+                relative_vectors.extend([0.0, 0.0])
+
+        state = np.concatenate([self.uav_pos, [self.battery_level], self.collected, [best_distance], relative_vectors], axis=0)
         return state.astype(np.float32)
 
     def step(self, action_idx):
@@ -93,15 +122,31 @@ class UAVInterceptEnv:
                 self.last_positions.pop(0)
             self.last_positions.append(self.uav_pos.copy())
 
-            # Movement penalty to encourage efficiency
-            reward -= 0.1
+            # Movement penalty to encourage efficiency (reduced)
+            reward -= 0.01
             
-            # Throughput-based reward shaping - reward for moving to higher throughput areas
-            for i, (su, du) in enumerate(self.connections):
-                if self.collected[i] == 0:
-                    movement_reward = self.signal_model.calculate_reward_for_movement(
-                        old_pos, self.uav_pos, i, self.connections)
-                    reward += movement_reward
+            # SINR-based reward shaping - reward for moving closer to connections with high SINR
+            if collected_this_step == 0:  # Only apply reward when not collecting in this step
+                # Tính SINR cho tất cả kết nối chưa thu thập ở vị trí cũ và mới
+                old_max_sinr = -float('inf')
+                new_max_sinr = -float('inf')
+
+                for i, (su, du) in enumerate(self.connections):
+                    if self.collected[i] == 0:
+                        old_sinr = self.signal_model.calculate_sinr(old_pos, i, self.connections)
+                        new_sinr = self.signal_model.calculate_sinr(self.uav_pos, i, self.connections)
+                        old_max_sinr = max(old_max_sinr, old_sinr)
+                        new_max_sinr = max(new_max_sinr, new_sinr)
+
+                if old_max_sinr == -float('inf'):
+                    old_max_sinr = 0.0
+                if new_max_sinr == -float('inf'):
+                    new_max_sinr = 0.0
+
+                # Reward cho việc tăng SINR tối đa (increased scale)
+                sinr_improvement = new_max_sinr - old_max_sinr
+                if sinr_improvement > 0:
+                    reward += min(sinr_improvement * 0.1, 2.0)  # Scale by 0.1, cap at 2.0 per step
                         
         elif action == "hover" and self.battery_level > 0:
             self.battery_level -= HOVER_DECAY
@@ -120,12 +165,12 @@ class UAVInterceptEnv:
                         self.hover_count[i] += 1
                         collected_this_step += 1
                     else:
-                        # Penalty cho hover không hiệu quả
-                        reward -= 5
+                        # Penalty cho hover không hiệu quả (reduced)
+                        reward -= 1
                         self.hover_count[i] += 1
                 elif self.collected[i] == 1:
-                    # Penalty cho hover trên đã thu thập
-                    reward -= 15
+                    # Penalty cho hover trên đã thu thập (reduced)
+                    reward -= 3
                     self.hover_count[i] += 1
 
         # Progress reward - scaled by number of collections
@@ -231,6 +276,15 @@ class UAVInterceptEnv:
         # Return efficiency as fraction of excess hovers (cap at 0 to avoid negative values)
         efficiency = 1.0 - (total_excess_hovers / max_possible_excess)
         return max(0.0, efficiency)  # Ensure non-negative efficiency
+
+    def _get_closest_point_on_segment(self, p, a, b):
+        """Tính điểm gần nhất trên đoạn thẳng từ điểm p đến segment a-b"""
+        ap = p - a
+        ab = b - a
+        t = np.dot(ap, ab) / (np.dot(ab, ab) + 1e-8)
+        t = np.clip(t, 0, 1)
+        closest = a + t * ab
+        return closest
 
     def get_connections(self):
         return np.array([np.concatenate([su, du]) for su, du in self.connections])

@@ -94,17 +94,6 @@ class DQNAgent:
             return np.random.randint(self.action_dim)
 
         q_vals = self.sess.run(self.q_values, {self.states: [state]})[0]
-
-        # Add entropy bonus for better exploration
-        if self.epsilon > 0.1:  # Only add bonus during exploration phase
-            probs = np.exp(q_vals - np.max(q_vals))  # Stable softmax
-            probs = probs / np.sum(probs)
-            entropy = -np.sum(probs * np.log(probs + 1e-8))
-
-            # Entropy bonus encourages exploration of uncertain states
-            entropy_bonus = 0.05 * entropy
-            q_vals = q_vals + entropy_bonus
-
         return np.argmax(q_vals)
 
     def train(self):
