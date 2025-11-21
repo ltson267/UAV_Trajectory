@@ -12,12 +12,13 @@ class DQNAgent:
         self.epsilon = EPSILON
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.995
-        self.lr = 0.001         # Increased LR
+        self.lr = 0.0005        # Reduced LR for stability
         self.batch_size = BATCH_SIZE
-        self.memory = ReplayBuffer()
-        self.target_update_freq = 500  # More frequent updates for stability
+        self.memory = ReplayBuffer(capacity=50000)  # Larger buffer for smoother distribution
+        self.target_update_freq = 200  # Less frequent updates to stabilize targets
         self.training_step = 0
         self.clip_norm = 1.0     # Gradient clipping norm
+        self.warmup_samples = self.batch_size * 10  # Warmup before training
         self._build_model()
 
     def _build_model(self):
@@ -97,13 +98,14 @@ class DQNAgent:
         return np.argmax(q_vals)
 
     def train(self):
-        if len(self.memory) < self.batch_size:
+        # Warmup phase: collect enough samples before training
+        if len(self.memory) < self.warmup_samples:
             return
 
         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
 
-        # Clip rewards to prevent gradient explosion
-        rewards = np.clip(rewards, -15.0, 75.0)
+        # Simple fixed clipping (remove running normalization to reduce drift)
+        norm_rewards = np.clip(rewards, -5.0, 5.0)
 
         # Double DQN: Use main network to select actions, target network to evaluate
         # Get best actions from main network
@@ -118,10 +120,9 @@ class DQNAgent:
         targets = current_q_values.copy()
         for i in range(self.batch_size):
             if dones[i]:
-                targets[i, actions[i]] = rewards[i]
+                targets[i, actions[i]] = norm_rewards[i]
             else:
-                # Use target network value for the action selected by main network
-                targets[i, actions[i]] = rewards[i] + self.gamma * target_q_values[i, best_actions[i]]
+                targets[i, actions[i]] = norm_rewards[i] + self.gamma * target_q_values[i, best_actions[i]]
 
         # Train the main network with Huber loss and gradient clipping
         self.sess.run(self.optimizer, {self.states: states, self.targets: targets})

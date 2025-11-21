@@ -4,7 +4,7 @@ from config import *
 from signal_model import SignalModel
 
 class UAVInterceptEnv:
-    def __init__(self):
+    def __init__(self, debug_components: bool = False):
         np.random.seed(SEED)
         random.seed(SEED)
         self.grid_x, self.grid_y = GRID_SIZE
@@ -19,6 +19,19 @@ class UAVInterceptEnv:
         self.su_nodes = []
         self.du_nodes = []
         self.signal_model = SignalModel()  # Initialize signal model
+        # Track previous target distance for shaping reward
+        self.prev_target_distance = None
+        # Threshold distance for allowing effective hover collection
+        self.hover_distance_threshold = 1.5
+        # Reward scale parameters (re-tuned)
+        self.move_cost = 0.01            # smaller movement cost
+        self.collect_reward = 1.2         # successful collection reward (smaller for tighter bounds)
+        self.hover_fail_penalty_near = 0.15
+        self.hover_fail_penalty_far = 0.35
+        self.completion_reward = 4.0      # terminal bonus
+        self.distance_scale = 0.15        # scaling for potential-based distance improvement (reduced)
+        self.proximity_bonus = 0.05       # bonus each step when within threshold but not hovering
+        self.debug_components = debug_components
         self._generate_connections()
         self.reset()
 
@@ -58,6 +71,8 @@ class UAVInterceptEnv:
         self.visited_positions = set()  # Track visited positions for exploration bonus
         self.hover_count = np.zeros(len(self.connections))  # Track hover count per connection
         self.last_positions = []  # Track recent positions for trajectory efficiency
+        # Initialize previous target distance
+        self.prev_target_distance = None
         return self.get_state()
 
     def get_state(self):
@@ -90,8 +105,38 @@ class UAVInterceptEnv:
                 # Cho kết nối đã thu thập, set vector về 0
                 relative_vectors.extend([0.0, 0.0])
 
+        # Normalize state để cùng scale (0-1 hoặc -1 đến 1)
         state = np.concatenate([self.uav_pos, [self.battery_level], self.collected, [best_distance], relative_vectors], axis=0)
-        return state.astype(np.float32)
+
+        # Normalization parameters
+        max_grid = 20.0  # GRID_SIZE max
+        max_battery = 100.0
+        max_distance = 30.0  # Approximate max distance
+        max_vector = 25.0  # Approximate max vector magnitude
+
+        # Normalize từng phần
+        normalized_state = np.zeros_like(state)
+
+        # UAV position: 0-20 → 0-1
+        normalized_state[0] = state[0] / max_grid
+        normalized_state[1] = state[1] / max_grid
+
+        # Battery: 0-100 → 0-1
+        normalized_state[2] = state[2] / max_battery
+
+        # Collected status: 0-1 (đã normalized)
+        normalized_state[3:8] = state[3:8]
+
+        # Best distance: 0-30 → 0-1
+        normalized_state[8] = state[8] / max_distance
+
+        # Relative vectors: ~-25 to +25 → ~-1 to +1
+        for i in range(5):
+            base_idx = 9 + i * 2
+            normalized_state[base_idx] = state[base_idx] / max_vector
+            normalized_state[base_idx + 1] = state[base_idx + 1] / max_vector
+
+        return normalized_state.astype(np.float32)
 
     def step(self, action_idx):
         action = self.actions[action_idx]
@@ -101,8 +146,24 @@ class UAVInterceptEnv:
         # Simplified movement - constant step size
         move_step = 1.0
 
-        reward = 0
+        reward = 0.0
+        # Component tracking for diagnostics
+        move_component = 0.0
+        distance_component = 0.0
+        away_penalty_component = 0.0
+        hover_success_component = 0.0
+        hover_fail_component = 0.0
+        proximity_component = 0.0
+        completion_component = 0.0
+        failure_penalty_component = 0.0
+        battery_penalty_component = 0.0
         collected_this_step = 0
+
+        # Determine current target (nearest uncollected connection segment)
+        target_idx, current_target_distance = self._get_current_target()
+        # Distance shaping: reward for reducing distance to target
+        if self.prev_target_distance is None:
+            self.prev_target_distance = current_target_distance
 
         # Movement và battery consumption
         if action in ["left", "right", "forward", "backward"] and self.battery_level > 0:
@@ -122,111 +183,125 @@ class UAVInterceptEnv:
                 self.last_positions.pop(0)
             self.last_positions.append(self.uav_pos.copy())
 
-            # Movement penalty to encourage efficiency (reduced)
-            reward -= 0.01
-            
-            # SINR-based reward shaping - reward for moving closer to connections with high SINR
-            if collected_this_step == 0:  # Only apply reward when not collecting in this step
-                # Tính SINR cho tất cả kết nối chưa thu thập ở vị trí cũ và mới
-                old_max_sinr = -float('inf')
-                new_max_sinr = -float('inf')
+            # Base movement penalty
+            remaining = max(1, self.num_connections - int(previous_collected))
+            # Fixed movement cost regardless of remaining targets
+            reward -= self.move_cost
+            move_component -= self.move_cost
 
-                for i, (su, du) in enumerate(self.connections):
-                    if self.collected[i] == 0:
-                        old_sinr = self.signal_model.calculate_sinr(old_pos, i, self.connections)
-                        new_sinr = self.signal_model.calculate_sinr(self.uav_pos, i, self.connections)
-                        old_max_sinr = max(old_max_sinr, old_sinr)
-                        new_max_sinr = max(new_max_sinr, new_sinr)
+            # Update target distance after movement
+            _, new_target_distance = self._get_current_target()
+            if self.prev_target_distance is not None and new_target_distance is not None and remaining > 0:
+                # Potential-based shaping: improvement only; moving away limited penalty
+                distance_delta = self.prev_target_distance - new_target_distance
+                if distance_delta > 0:
+                    inc = self.distance_scale * distance_delta
+                    reward += inc
+                    distance_component += inc
+                elif distance_delta < 0:
+                    dec = min(self.distance_scale * (-distance_delta), 0.2)
+                    reward -= dec
+                    away_penalty_component -= dec
 
-                if old_max_sinr == -float('inf'):
-                    old_max_sinr = 0.0
-                if new_max_sinr == -float('inf'):
-                    new_max_sinr = 0.0
+            # Proximity shaping: encourage moving into threshold before hover
+            if new_target_distance is not None and new_target_distance <= self.hover_distance_threshold and action != "hover":
+                reward += self.proximity_bonus
+                proximity_component += self.proximity_bonus
+            self.prev_target_distance = new_target_distance
 
-                # Reward cho việc tăng SINR tối đa (increased scale)
-                sinr_improvement = new_max_sinr - old_max_sinr
-                if sinr_improvement > 0:
-                    reward += min(sinr_improvement * 0.1, 2.0)  # Scale by 0.1, cap at 2.0 per step
+            # Target-specific throughput improvement shaping (not global max)
+            # Optional: throughput shaping removed to stabilize variance
+            # (Retained logic could be re-enabled if needed)
                         
         elif action == "hover" and self.battery_level > 0:
             self.battery_level -= HOVER_DECAY
             collected_this_step = 0
-            hover_on_collected = False
-
-            for i, (su, du) in enumerate(self.connections):
-                if self.collected[i] == 0:  # Chỉ kiểm tra các kết nối chưa thu thập
-                    throughput = self.signal_model.get_throughput_at_position(
-                        self.uav_pos, i, self.connections)
-
+            # Single target collection logic
+            if target_idx is not None and self.collected[target_idx] == 0 and current_target_distance is not None:
+                # Only attempt collection if within threshold; otherwise treat as inefficient hover
+                if current_target_distance <= self.hover_distance_threshold:
+                    throughput = self.signal_model.get_throughput_at_position(self.uav_pos, target_idx, self.connections)
                     if self.signal_model.can_collect_signal(throughput):
-                        # Collection reward
-                        reward += 100
-                        self.collected[i] = 1
-                        self.hover_count[i] += 1
-                        collected_this_step += 1
+                        reward += self.collect_reward
+                        hover_success_component += self.collect_reward
+                        self.collected[target_idx] = 1
+                        self.hover_count[target_idx] += 1  # count only on target
+                        collected_this_step = 1
                     else:
-                        # Penalty cho hover không hiệu quả (reduced)
-                        reward -= 1
-                        self.hover_count[i] += 1
-                elif self.collected[i] == 1:
-                    # Penalty cho hover trên đã thu thập (reduced)
-                    reward -= 3
-                    self.hover_count[i] += 1
+                        # Near target but insufficient throughput
+                        reward -= self.hover_fail_penalty_near
+                        hover_fail_component -= self.hover_fail_penalty_near
+                        self.hover_count[target_idx] += 1
+                else:
+                    # Hovering too far from target - stronger penalty
+                    reward -= self.hover_fail_penalty_far
+                    hover_fail_component -= self.hover_fail_penalty_far
+                    # count still as attempt on target
+                    self.hover_count[target_idx] += 1
+            else:
+                # Hovering with no valid target (either all collected or misaligned)
+                reward -= self.hover_fail_penalty_far
+                hover_fail_component -= self.hover_fail_penalty_far
+                # Do not increment hover counts for already collected connections to avoid efficiency collapse
 
-        # Progress reward - scaled by number of collections
+            # After hover, update target distance reference (target may change after collection)
+            new_idx, new_dist = self._get_current_target()
+            self.prev_target_distance = new_dist
+
+        # Per-collection smoothing: spread former progress bonus into small residual after collection
         current_progress = np.sum(self.collected) / len(self.collected)
-        if current_progress > previous_collected / len(self.collected):
-            # Progressive bonus that increases with more collections
-            progress_bonus = 20 + (current_progress * 30)
-            reward += progress_bonus
+        # Small progressive bonus folded into collection reward: none needed here
 
         # Completion bonus - reward for completing all tasks
         if np.all(self.collected == 1):
             battery_efficiency = self.battery_level / 100.0
             trajectory_length = self.get_trajectory_length()
             hover_efficiency = self.get_hover_efficiency()
-
-            # Base completion reward
-            base_completion = 200
-
-            # Battery efficiency bonus (up to 100 points for high battery)
-            battery_bonus = battery_efficiency * 100
-
-            # Trajectory efficiency bonus (reward shorter paths)
-            # Ideal path is around 25-35 units for 5 connections
-            optimal_length = 30.0
-            if trajectory_length < optimal_length:
-                length_bonus = (optimal_length - trajectory_length) * 3
-            else:
-                length_bonus = max(0, (optimal_length - (trajectory_length - optimal_length) * 0.5))
-
-            # Hover efficiency bonus (reward efficient hovering)
-            hover_bonus = hover_efficiency * 50
-
-            completion_bonus = base_completion + battery_bonus + length_bonus + hover_bonus
-            reward += completion_bonus
+            comp = self.completion_reward + battery_efficiency * 2.0
+            reward += comp
+            completion_component += comp
         
-        # Time penalty - encourage faster completion
-        if self.steps > 50 and not np.all(self.collected == 1):
-            # Progressive time penalty
-            time_penalty = (self.steps - 50) * 0.05
-            reward -= min(time_penalty, 10)  # Cap at -10
+        # Time penalty reduced: applied later to avoid early distortion
+        # Optional time penalty removed in bounded design
 
-        # Strong penalty for not completing
+        # Final failure penalty reduced
         if self.steps >= self.max_steps - 1 and not np.all(self.collected == 1):
-            reward -= 50
+            reward -= 3.0  # small failure penalty
+            failure_penalty_component -= 3.0
 
         # Penalty for battery depletion
         if self.battery_level <= 0:
             if not np.all(self.collected == 1):
-                reward -= 30
+                reward -= 1.5
+                battery_penalty_component -= 1.5
             self.battery_level = 0
 
         self.steps += 1
         self.trajectory.append(self.uav_pos.copy())
 
+        # Clip reward to narrower band after smoothing
+        # Final clip to bounded range suitable for value updates
+        reward = np.clip(reward, -3.0, 3.0)
+
         done = self.is_done() or self.battery_level <= 0
-        return self.get_state(), reward, done
+
+        if self.debug_components:
+            self.last_info = {
+                'move': move_component,
+                'distance_improve': distance_component,
+                'distance_away_penalty': away_penalty_component,
+                'hover_success': hover_success_component,
+                'hover_fail': hover_fail_component,
+                'completion': completion_component,
+                'proximity': proximity_component,
+                'failure_penalty': failure_penalty_component,
+                'battery_penalty': battery_penalty_component,
+                'raw_reward': reward
+            }
+        else:
+            self.last_info = None
+
+        return self.get_state(), reward, done, (self.last_info if self.debug_components else {})
 
     def _calculate_trajectory_efficiency(self):
         """Calculate battery efficiency for recent trajectory"""
@@ -288,3 +363,18 @@ class UAVInterceptEnv:
 
     def get_connections(self):
         return np.array([np.concatenate([su, du]) for su, du in self.connections])
+
+    def _get_current_target(self):
+        """Select nearest uncollected connection segment as target.
+        Returns (index, distance) or (None, None) if all collected."""
+        min_dist = float('inf')
+        target_idx = None
+        for i, (su, du) in enumerate(self.connections):
+            if self.collected[i] == 0:
+                dist = self._point_to_segment_dist(self.uav_pos, su, du)
+                if dist < min_dist:
+                    min_dist = dist
+                    target_idx = i
+        if target_idx is None:
+            return None, None
+        return target_idx, min_dist

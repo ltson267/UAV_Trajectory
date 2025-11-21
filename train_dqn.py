@@ -4,6 +4,7 @@ Script để train DQN Agent độc lập
 import matplotlib.pyplot as plt
 from config import *
 from uav_intercept_env import UAVInterceptEnv
+from greedy_agent import GreedyAgent
 from dql_agent import DQNAgent
 import numpy as np
 
@@ -11,9 +12,24 @@ def train_dqn(episodes=EPISODES):
     """Train DQN Agent"""
     print("=== Training DQN Agent ===")
 
-    env = UAVInterceptEnv()
+    # Enable component debugging
+    env = UAVInterceptEnv(debug_components=True)
     state = env.reset()
     agent = DQNAgent(state_dim=len(state), action_dim=len(ACTIONS))
+    # Prefill replay buffer using Greedy policy for better initial diversity
+    prefill_steps = 3000
+    greedy = GreedyAgent(state_dim=len(state), action_dim=len(ACTIONS))
+    greedy.update_connections(env.get_links())
+    prefill_state = state.copy()
+    for _ in range(prefill_steps):
+        g_action = greedy.act(prefill_state)
+        ns, r, d, _info = env.step(g_action)
+        agent.memory.push(prefill_state.astype(np.float32), g_action, r, ns.astype(np.float32), int(d))
+        prefill_state = ns
+        if d:
+            prefill_state = env.reset()
+            greedy.update_connections(env.get_links())
+    print(f"[Prefill] Added {len(agent.memory.buffer)} transitions using Greedy policy.")
 
     rewards_history = []
     moving_avg_rewards = []
@@ -26,13 +42,19 @@ def train_dqn(episodes=EPISODES):
     best_connections = None
 
     epsilon = EPSILON
-    min_epsilon = 0.1  # Lower minimum for better exploitation later
-    decay = 0.997      # Slower decay for sustained exploration
+    min_epsilon = 0.05   # allow deeper exploitation phase
+    decay = 0.995        # decay applied each episode
 
+    # For component logging
+    component_keys = ['move','distance_improve','distance_away_penalty','hover_success','hover_fail','completion','failure_penalty','battery_penalty']
+    component_history = {k: [] for k in component_keys}
     for ep in range(episodes):
         state = env.reset()
+        greedy.update_connections(env.get_links())
         total_reward = 0
         agent.epsilon = epsilon
+        # Episode component accumulators
+        ep_components = {k: 0.0 for k in component_keys}
 
         for step in range(env.max_steps):
             action = agent.act(state)
@@ -41,7 +63,7 @@ def train_dqn(episodes=EPISODES):
                 print(f"[ERROR] Action out of range: {action}")
                 continue
 
-            next_state, reward, done = env.step(action)
+            next_state, reward, done, info = env.step(action)
             state_flat = np.array(state, dtype=np.float32).flatten()
             next_state_flat = np.array(next_state, dtype=np.float32).flatten()
 
@@ -55,10 +77,15 @@ def train_dqn(episodes=EPISODES):
             state = next_state
             total_reward += reward
 
+            if info:
+                for k in component_keys:
+                    ep_components[k] += info.get(k, 0.0)
             if done:
                 break
 
         rewards_history.append(total_reward)
+        for k in component_keys:
+            component_history[k].append(ep_components[k])
 
         # Calculate moving average
         if len(rewards_history) >= 100:
@@ -90,10 +117,14 @@ def train_dqn(episodes=EPISODES):
             avg_length = np.mean(trajectory_lengths[-50:]) if len(trajectory_lengths) >= 50 else np.mean(trajectory_lengths)
             avg_efficiency = np.mean(hover_efficiencies[-50:]) if len(hover_efficiencies) >= 50 else np.mean(hover_efficiencies)
             avg_battery = np.mean(battery_levels[-50:]) if len(battery_levels) >= 50 else np.mean(battery_levels)
+            comp_str = ", ".join([f"{k}:{np.mean(component_history[k][-50:]):.2f}" for k in component_keys]) if len(component_history['move'])>=50 else ", ".join([f"{k}:{ep_components[k]:.2f}" for k in component_keys])
             print(f"[DQN] Episode {ep+1:04d} | Steps: {step+1:3d} | Reward: {total_reward:8.2f} | "
                    f"Epsilon: {epsilon:.3f} | Moving Avg: {moving_avg_rewards[-1]:8.2f} | "
                    f"Completion: {completion:.2%} | Best: {best_reward:8.2f} | "
-                   f"Length: {avg_length:6.1f} | Efficiency: {avg_efficiency:.2f} | Battery: {avg_battery:5.1f}")
+                   f"Length: {avg_length:6.1f} | Efficiency: {avg_efficiency:.2f} | Battery: {avg_battery:5.1f} | Components[{comp_str}]")
+
+        # Epsilon decay per episode
+        epsilon = max(min_epsilon, epsilon * decay)
 
         # Early stopping - adjusted for reward system
         if len(moving_avg_rewards) >= 200:
