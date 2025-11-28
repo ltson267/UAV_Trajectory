@@ -4,7 +4,6 @@ Script để train DQN Agent độc lập
 import matplotlib.pyplot as plt
 from config import *
 from uav_intercept_env import UAVInterceptEnv
-from greedy_agent import GreedyAgent
 from dql_agent import DQNAgent
 import numpy as np
 
@@ -12,24 +11,11 @@ def train_dqn(episodes=EPISODES):
     """Train DQN Agent"""
     print("=== Training DQN Agent ===")
 
-    # Enable component debugging
+    # Enable component debugging with disaster_mode
     env = UAVInterceptEnv(debug_components=True)
     state = env.reset()
     agent = DQNAgent(state_dim=len(state), action_dim=len(ACTIONS))
-    # Prefill replay buffer using Greedy policy for better initial diversity
-    prefill_steps = 3000
-    greedy = GreedyAgent(state_dim=len(state), action_dim=len(ACTIONS))
-    greedy.update_connections(env.get_links())
-    prefill_state = state.copy()
-    for _ in range(prefill_steps):
-        g_action = greedy.act(prefill_state)
-        ns, r, d, _info = env.step(g_action)
-        agent.memory.push(prefill_state.astype(np.float32), g_action, r, ns.astype(np.float32), int(d))
-        prefill_state = ns
-        if d:
-            prefill_state = env.reset()
-            greedy.update_connections(env.get_links())
-    print(f"[Prefill] Added {len(agent.memory.buffer)} transitions using Greedy policy.")
+    print(f"[Init] state_dim={len(state)} | action_dim={len(ACTIONS)}")
 
     rewards_history = []
     moving_avg_rewards = []
@@ -46,11 +32,10 @@ def train_dqn(episodes=EPISODES):
     decay = 0.995        # decay applied each episode
 
     # For component logging
-    component_keys = ['move','distance_improve','distance_away_penalty','hover_success','hover_fail','completion','failure_penalty','battery_penalty']
+    component_keys = ['move','throughput_gain','throughput_loss','hover_success','hover_fail','completion','failure_penalty','battery_penalty']
     component_history = {k: [] for k in component_keys}
     for ep in range(episodes):
         state = env.reset()
-        greedy.update_connections(env.get_links())
         total_reward = 0
         agent.epsilon = epsilon
         # Episode component accumulators
