@@ -1,10 +1,20 @@
-import tensorflow.compat.v1 as tf
-tf.disable_v2_behavior()
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, Model, Input
 import numpy as np
 from config import *
 from replay_buffer import PrioritizedReplayBuffer
 
+
 class DQNAgent:
+    """
+    TensorFlow 2.x DQN Agent with:
+    - Dueling architecture (separate Value and Advantage streams)
+    - Double DQN (action selection from main, evaluation from target)
+    - Prioritized Experience Replay (PER) with importance sampling
+    - Soft target updates (TAU) + periodic hard updates
+    """
+    
     def __init__(self, state_dim, action_dim):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -14,143 +24,177 @@ class DQNAgent:
         self.epsilon_decay = EPSILON_DECAY
         self.lr = LEARNING_RATE
         self.batch_size = BATCH_SIZE
-        # Prioritized Experience Replay for improved sample efficiency
+        
+        # Prioritized Experience Replay
         self.memory = PrioritizedReplayBuffer(capacity=50000)
-        # Use soft updates by default; keep periodic hard update as fallback
-        self.target_update_freq = 200
+        
+        # Training parameters
+        self.target_update_freq = 200  # Hard update frequency
         self.training_step = 0
-        self.clip_norm = 1.0     # Gradient clipping norm
-        self.warmup_samples = self.batch_size * 10  # Warmup before training
+        self.clip_norm = 1.0
+        self.warmup_samples = self.batch_size * 10
+        
+        # Build networks
         self._build_model()
+        
+        # Optimizer
+        self.optimizer = keras.optimizers.Adam(learning_rate=self.lr, clipnorm=self.clip_norm)
+
+    def _build_dueling_network(self, name):
+        """
+        Build Dueling DQN architecture:
+        Input → FC layers → Split into Value/Advantage → Combine to Q-values
+        """
+        inputs = Input(shape=(self.state_dim,), name=f'{name}_input')
+        
+        # Shared layers
+        fc1 = layers.Dense(256, activation='relu', 
+                          kernel_initializer='he_normal',
+                          name=f'{name}_fc1')(inputs)
+        fc2 = layers.Dense(128, activation='relu',
+                          kernel_initializer='he_normal',
+                          name=f'{name}_fc2')(fc1)
+        
+        # Value stream
+        value_fc = layers.Dense(64, activation='relu',
+                               kernel_initializer='he_normal',
+                               name=f'{name}_value_fc')(fc2)
+        value = layers.Dense(1, name=f'{name}_value')(value_fc)
+        
+        # Advantage stream
+        advantage_fc = layers.Dense(64, activation='relu',
+                                   kernel_initializer='he_normal',
+                                   name=f'{name}_advantage_fc')(fc2)
+        advantage = layers.Dense(self.action_dim, 
+                                name=f'{name}_advantage')(advantage_fc)
+        
+        # Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
+        def dueling_combine(inputs_list):
+            val, adv = inputs_list
+            mean_adv = tf.reduce_mean(adv, axis=1, keepdims=True)
+            return val + (adv - mean_adv)
+        
+        q_values = layers.Lambda(dueling_combine, 
+                                name=f'{name}_q_values')([value, advantage])
+        
+        return Model(inputs=inputs, outputs=q_values, name=name)
 
     def _build_model(self):
-        # Main Q-Network (Dueling Architecture)
-        self.states = tf.placeholder(tf.float32, [None, self.state_dim])
-        self.targets = tf.placeholder(tf.float32, [None, self.action_dim])
+        """Build main and target networks"""
+        self.model = self._build_dueling_network('main_network')
+        self.target_model = self._build_dueling_network('target_network')
+        
+        # Initialize target with main weights
+        self.target_model.set_weights(self.model.get_weights())
 
-        with tf.variable_scope('main_network'):
-            fc1 = tf.layers.dense(self.states, 256, activation=tf.nn.relu,
-                                  kernel_initializer=tf.keras.initializers.he_normal(), name='fc1')
-            fc2 = tf.layers.dense(fc1, 128, activation=tf.nn.relu,
-                                  kernel_initializer=tf.keras.initializers.he_normal(), name='fc2')
-
-            # Dueling: Split into Value and Advantage streams
-            value_fc = tf.layers.dense(fc2, 64, activation=tf.nn.relu,
-                                       kernel_initializer=tf.keras.initializers.he_normal(), name='value_fc')
-            advantage_fc = tf.layers.dense(fc2, 64, activation=tf.nn.relu,
-                                           kernel_initializer=tf.keras.initializers.he_normal(), name='advantage_fc')
-
-            # Value stream (state value)
-            self.value = tf.layers.dense(value_fc, 1, name='value')
-
-            # Advantage stream (action advantages)
-            self.advantage = tf.layers.dense(advantage_fc, self.action_dim, name='advantage')
-
-            # Combine: Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
-            mean_advantage = tf.reduce_mean(self.advantage, axis=1, keepdims=True)
-            self.q_values = self.value + (self.advantage - mean_advantage)
-
-        # Target Q-Network (Dueling Architecture)
-        with tf.variable_scope('target_network'):
-            target_fc1 = tf.layers.dense(self.states, 256, activation=tf.nn.relu,
-                                         kernel_initializer=tf.keras.initializers.he_normal(), name='fc1')
-            target_fc2 = tf.layers.dense(target_fc1, 128, activation=tf.nn.relu,
-                                         kernel_initializer=tf.keras.initializers.he_normal(), name='fc2')
-
-            # Dueling target streams
-            target_value_fc = tf.layers.dense(target_fc2, 64, activation=tf.nn.relu,
-                                              kernel_initializer=tf.keras.initializers.he_normal(), name='value_fc')
-            target_advantage_fc = tf.layers.dense(target_fc2, 64, activation=tf.nn.relu,
-                                                  kernel_initializer=tf.keras.initializers.he_normal(), name='advantage_fc')
-
-            target_value = tf.layers.dense(target_value_fc, 1, name='value')
-            target_advantage = tf.layers.dense(target_advantage_fc, self.action_dim, name='advantage')
-
-            mean_target_advantage = tf.reduce_mean(target_advantage, axis=1, keepdims=True)
-            self.target_q_values = target_value + (target_advantage - mean_target_advantage)
-
-        # Huber Loss (robust), with importance-sampling weights support
-        self.is_weights = tf.placeholder(tf.float32, [None])  # PER importance weights
-        delta = self.targets - self.q_values
-        abs_delta = tf.abs(delta)
-        quadratic_part = tf.clip_by_value(abs_delta, 0.0, 1.0)
-        linear_part = abs_delta - quadratic_part
-        per_sample_loss = tf.reduce_sum(0.5 * quadratic_part**2 + linear_part, axis=1)
-        weighted_loss = per_sample_loss * self.is_weights
-        self.loss = tf.reduce_mean(weighted_loss)
-
-        # Single optimizer definition with gradient clipping
-        self.optimizer = tf.train.AdamOptimizer(self.lr)
-        gradients, variables = zip(*self.optimizer.compute_gradients(self.loss))
-        gradients, _ = tf.clip_by_global_norm(gradients, self.clip_norm)
-        self.optimizer = self.optimizer.apply_gradients(zip(gradients, variables))
-
-        # Target network update operation (hard copy)
-        main_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='main_network')
-        target_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='target_network')
-        self.update_target = [target_vars[i].assign(main_vars[i]) for i in range(len(main_vars))]
-        # Soft update ops using TAU
-        self.soft_update_target = [
-            target_vars[i].assign(TAU * main_vars[i] + (1.0 - TAU) * target_vars[i])
-            for i in range(len(main_vars))
-        ]
-
-        self.sess = tf.Session()
-        self.sess.run(tf.global_variables_initializer())
-        # Initialize target network with main network weights
-        self.sess.run(self.update_target)
+    @tf.function
+    def _train_step(self, states, targets, is_weights):
+        """
+        Single training step with gradient computation
+        Uses Huber loss weighted by importance sampling
+        """
+        with tf.GradientTape() as tape:
+            # Forward pass
+            q_values = self.model(states, training=True)
+            
+            # Huber loss (delta = 1.0)
+            delta = targets - q_values
+            abs_delta = tf.abs(delta)
+            quadratic_part = tf.minimum(abs_delta, 1.0)
+            linear_part = abs_delta - quadratic_part
+            per_sample_loss = tf.reduce_sum(
+                0.5 * quadratic_part**2 + linear_part, 
+                axis=1
+            )
+            
+            # Weight by importance sampling
+            weighted_loss = per_sample_loss * is_weights
+            loss = tf.reduce_mean(weighted_loss)
+        
+        # Compute and apply gradients (clipnorm handled by optimizer)
+        gradients = tape.gradient(loss, self.model.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+        
+        return loss
 
     def act(self, state):
+        """Epsilon-greedy action selection"""
         if np.random.rand() < self.epsilon:
             return np.random.randint(self.action_dim)
-
-        q_vals = self.sess.run(self.q_values, {self.states: [state]})[0]
+        
+        state_batch = np.expand_dims(state, axis=0)
+        q_vals = self.model.predict(state_batch, verbose=0)[0]
         return np.argmax(q_vals)
 
     def train(self):
-        # Warmup phase: collect enough samples before training
+        """
+        Train on batch from PER:
+        1. Sample with priorities
+        2. Compute Double DQN targets
+        3. Calculate TD errors BEFORE training
+        4. Train network
+        5. Update PER priorities
+        6. Update target network (soft + periodic hard)
+        """
+        # Warmup phase
         if len(self.memory) < self.warmup_samples:
             return
-
-        states, actions, rewards, next_states, dones, indices, is_weights = self.memory.sample(self.batch_size)
-
+        
+        # Sample from PER
+        states, actions, rewards, next_states, dones, indices, is_weights = \
+            self.memory.sample(self.batch_size)
+        
         # Clip rewards for stability
         norm_rewards = np.clip(rewards, -10.0, 10.0)
-
-        # Double DQN: Use main network to select actions, target network to evaluate
-        # Get best actions from main network
-        next_q_values_main = self.sess.run(self.q_values, {self.states: next_states})
-        best_actions = np.argmax(next_q_values_main, axis=1)
-
-        # Get Q-values for those actions from target network
-        target_q_values = self.sess.run(self.target_q_values, {self.states: next_states})
-        current_q_values = self.sess.run(self.q_values, {self.states: states})
-
-        # Compute target Q-values using Double DQN and TD errors BEFORE training
-        targets = current_q_values.copy()
+        
+        # Double DQN: action selection from main, evaluation from target
+        next_q_main = self.model.predict(next_states, verbose=0)
+        best_actions = np.argmax(next_q_main, axis=1)
+        
+        target_q = self.target_model.predict(next_states, verbose=0)
+        current_q = self.model.predict(states, verbose=0)
+        
+        # Compute targets and TD errors BEFORE training
+        targets = current_q.copy()
         td_errors = []
+        
         for i in range(self.batch_size):
             if dones[i]:
                 target_val = norm_rewards[i]
             else:
-                target_val = norm_rewards[i] + self.gamma * target_q_values[i, best_actions[i]]
+                target_val = norm_rewards[i] + self.gamma * target_q[i, best_actions[i]]
             targets[i, actions[i]] = target_val
-            # Compute TD error for PER priority update
-            td_errors.append(target_val - current_q_values[i, actions[i]])
+            td_errors.append(target_val - current_q[i, actions[i]])
+        
         td_errors = np.array(td_errors)
-
-        # Train the main network with Huber loss and gradient clipping
-        self.sess.run(self.optimizer, {self.states: states, self.targets: targets, self.is_weights: is_weights})
-
+        
+        # Train the network
+        loss = self._train_step(
+            tf.convert_to_tensor(states, dtype=tf.float32),
+            tf.convert_to_tensor(targets, dtype=tf.float32),
+            tf.convert_to_tensor(is_weights, dtype=tf.float32)
+        )
+        
         # Update PER priorities
         self.memory.update_priorities(indices, td_errors)
-
-        # Update target network periodically (less frequently to prevent forgetting)
+        
+        # Update target network
         self.training_step += 1
+        
+        # Hard update every N steps
         if self.training_step % self.target_update_freq == 0:
-            self.sess.run(self.update_target)
-        # Soft update every step for smoother tracking
-        self.sess.run(self.soft_update_target)
+            self.target_model.set_weights(self.model.get_weights())
+        
+        # Soft update every step
+        self._soft_update_target()
 
-        # Decay epsilon (disabled to let training script handle it)
-        pass
+    def _soft_update_target(self):
+        """Soft update: θ_target = τ*θ_main + (1-τ)*θ_target"""
+        main_weights = self.model.get_weights()
+        target_weights = self.target_model.get_weights()
+        
+        updated_weights = []
+        for main_w, target_w in zip(main_weights, target_weights):
+            updated_weights.append(TAU * main_w + (1.0 - TAU) * target_w)
+        
+        self.target_model.set_weights(updated_weights)
