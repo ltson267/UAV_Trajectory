@@ -2,7 +2,7 @@ import tensorflow.compat.v1 as tf
 tf.disable_v2_behavior()
 import numpy as np
 from config import *
-from replay_buffer import ReplayBuffer
+from replay_buffer import PrioritizedReplayBuffer
 
 class DQNAgent:
     def __init__(self, state_dim, action_dim):
@@ -10,12 +10,14 @@ class DQNAgent:
         self.action_dim = action_dim
         self.gamma = GAMMA
         self.epsilon = EPSILON
-        self.epsilon_min = 0.05
-        self.epsilon_decay = 0.995
-        self.lr = 0.0005        # Reduced LR for stability
+        self.epsilon_min = EPSILON_MIN
+        self.epsilon_decay = EPSILON_DECAY
+        self.lr = LEARNING_RATE
         self.batch_size = BATCH_SIZE
-        self.memory = ReplayBuffer(capacity=50000)  # Larger buffer for smoother distribution
-        self.target_update_freq = 200  # Less frequent updates to stabilize targets
+        # Prioritized Experience Replay for improved sample efficiency
+        self.memory = PrioritizedReplayBuffer(capacity=50000)
+        # Use soft updates by default; keep periodic hard update as fallback
+        self.target_update_freq = 200
         self.training_step = 0
         self.clip_norm = 1.0     # Gradient clipping norm
         self.warmup_samples = self.batch_size * 10  # Warmup before training
@@ -67,12 +69,15 @@ class DQNAgent:
             mean_target_advantage = tf.reduce_mean(target_advantage, axis=1, keepdims=True)
             self.target_q_values = target_value + (target_advantage - mean_target_advantage)
 
-        # Huber Loss (more robust to outliers than MSE)
+        # Huber Loss (robust), with importance-sampling weights support
+        self.is_weights = tf.placeholder(tf.float32, [None])  # PER importance weights
         delta = self.targets - self.q_values
         abs_delta = tf.abs(delta)
         quadratic_part = tf.clip_by_value(abs_delta, 0.0, 1.0)
         linear_part = abs_delta - quadratic_part
-        self.loss = tf.reduce_mean(0.5 * quadratic_part**2 + linear_part)
+        per_sample_loss = tf.reduce_sum(0.5 * quadratic_part**2 + linear_part, axis=1)
+        weighted_loss = per_sample_loss * self.is_weights
+        self.loss = tf.reduce_mean(weighted_loss)
 
         # Single optimizer definition with gradient clipping
         self.optimizer = tf.train.AdamOptimizer(self.lr)
@@ -80,10 +85,15 @@ class DQNAgent:
         gradients, _ = tf.clip_by_global_norm(gradients, self.clip_norm)
         self.optimizer = self.optimizer.apply_gradients(zip(gradients, variables))
 
-        # Target network update operation
+        # Target network update operation (hard copy)
         main_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='main_network')
         target_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='target_network')
         self.update_target = [target_vars[i].assign(main_vars[i]) for i in range(len(main_vars))]
+        # Soft update ops using TAU
+        self.soft_update_target = [
+            target_vars[i].assign(TAU * main_vars[i] + (1.0 - TAU) * target_vars[i])
+            for i in range(len(main_vars))
+        ]
 
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
@@ -102,7 +112,7 @@ class DQNAgent:
         if len(self.memory) < self.warmup_samples:
             return
 
-        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
+        states, actions, rewards, next_states, dones, indices, is_weights = self.memory.sample(self.batch_size)
 
         # Simple fixed clipping (remove running normalization to reduce drift)
         norm_rewards = np.clip(rewards, -5.0, 5.0)
@@ -124,13 +134,24 @@ class DQNAgent:
             else:
                 targets[i, actions[i]] = norm_rewards[i] + self.gamma * target_q_values[i, best_actions[i]]
 
+        # Compute TD errors for PER priority updates
+        td_errors = []
+        for i in range(self.batch_size):
+            td_errors.append(targets[i, actions[i]] - self.sess.run(self.q_values, {self.states: states[i:i+1]})[0, actions[i]])
+        td_errors = np.array(td_errors)
+
         # Train the main network with Huber loss and gradient clipping
-        self.sess.run(self.optimizer, {self.states: states, self.targets: targets})
+        self.sess.run(self.optimizer, {self.states: states, self.targets: targets, self.is_weights: is_weights})
+
+        # Update PER priorities
+        self.memory.update_priorities(indices, td_errors)
 
         # Update target network periodically (less frequently to prevent forgetting)
         self.training_step += 1
         if self.training_step % self.target_update_freq == 0:
             self.sess.run(self.update_target)
+        # Soft update every step for smoother tracking
+        self.sess.run(self.soft_update_target)
 
         # Decay epsilon (disabled to let training script handle it)
         pass

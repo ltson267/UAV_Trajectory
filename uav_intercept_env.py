@@ -4,9 +4,11 @@ from config import *
 from signal_model import SignalModel
 
 class UAVInterceptEnv:
-    def __init__(self, debug_components: bool = False):
-        np.random.seed(SEED)
-        random.seed(SEED)
+    def __init__(self, debug_components: bool = False, randomize: bool = True):
+        # Respect randomize flag: avoid fixed seed when randomizing episodes
+        if not randomize:
+            np.random.seed(SEED)
+            random.seed(SEED)
         self.grid_x, self.grid_y = GRID_SIZE
         self.actions = ACTIONS
         self.max_steps = MAX_STEPS
@@ -34,20 +36,29 @@ class UAVInterceptEnv:
         # Throughput tracking
         self.prev_avg_uncollected_sinr = None
         self.debug_components = debug_components
-        self._generate_connections()
+        self.randomize = randomize
+        self._generate_connections(domain_randomization=randomize)
         self.reset()
 
-    def _generate_connections(self):
+    def _generate_connections(self, domain_randomization: bool = True):
         self.connections = []
         self.su_nodes = []
         self.du_nodes = []
         margin = 2
-        min_len = 3
-        max_len = min(self.grid_x, self.grid_y) / 2
-        su_x = np.linspace(margin, self.grid_x - margin, self.num_connections)
-        for i in range(self.num_connections):
-            su_y = np.random.uniform(margin, self.grid_y - margin)
-            su = np.array([su_x[i], su_y])
+        if domain_randomization:
+            num_conn = np.random.randint(3, self.num_connections + 3)
+            min_len = np.random.uniform(2, 4)
+            max_len = np.random.uniform(6, 10)
+        else:
+            num_conn = self.num_connections
+            min_len = 3
+            max_len = min(self.grid_x, self.grid_y) / 2
+
+        for i in range(num_conn):
+            su = np.array([
+                np.random.uniform(margin, self.grid_x - margin),
+                np.random.uniform(margin, self.grid_y - margin)
+            ])
             for _ in range(100):
                 angle = np.random.uniform(0, 2 * np.pi)
                 length = np.random.uniform(min_len, max_len)
@@ -65,13 +76,22 @@ class UAVInterceptEnv:
         return [(np.array(su), np.array(du)) for su, du in self.connections]
 
     def reset(self):
+        # Episode randomization (do before initializing collected/hover_count)
+        if self.randomize:
+            # Regenerate map and random start
+            self._generate_connections(domain_randomization=True)
+            self.uav_init_pos = np.array([
+                np.random.uniform(0, self.grid_x),
+                np.random.uniform(0, self.grid_y)
+            ])
         self.uav_pos = self.uav_init_pos.copy()
         self.battery_level = 100.0  # Adjusted for MOVE_DECAY=0.25 with 3-level battery system
         self.steps = 0
+        # Initialize arrays based on current number of connections (may have changed)
         self.collected = np.zeros(len(self.connections))
+        self.hover_count = np.zeros(len(self.connections))  # Track hover count per connection
         self.trajectory = [self.uav_pos.copy()]
         self.visited_positions = set()  # Track visited positions for exploration bonus
-        self.hover_count = np.zeros(len(self.connections))  # Track hover count per connection
         self.last_positions = []  # Track recent positions for trajectory efficiency
         # Initialize previous target distance
         self.prev_target_distance = None
@@ -349,6 +369,8 @@ class UAVInterceptEnv:
 
         # Clip reward to narrower band after smoothing
         # Final clip to bounded range suitable for value updates
+        # Replace previous reward computation with calculate_reward
+        reward = self.calculate_reward(action, old_pos, collected_this_step)
         reward = np.clip(reward, -4.0, 6.0)
 
         done = self.is_done() or self.battery_level <= 0
@@ -385,6 +407,33 @@ class UAVInterceptEnv:
         t = np.clip(t, 0, 1)
         closest = a + t * ab
         return np.linalg.norm(p - closest)
+
+    def _get_min_uncollected_distance(self, pos):
+        dists = []
+        for i,(su,du) in enumerate(self.connections):
+            if self.collected[i] == 0:
+                dists.append(self._point_to_segment_dist(pos, su, du))
+        return min(dists) if dists else 0.0
+
+    def calculate_reward(self, action, old_pos, collected_this_step):
+        reward = 0.0
+        # Level 1: Collection
+        if collected_this_step:
+            progress = np.sum(self.collected) / len(self.collected)
+            reward += COLLECT_BASE_REWARD * (1 + progress)
+
+        # Level 2: Potential-based shaping
+        old_potential = -self._get_min_uncollected_distance(old_pos)
+        new_potential = -self._get_min_uncollected_distance(self.uav_pos)
+        shaping = GAMMA * new_potential - old_potential
+        reward += 0.1 * shaping
+
+        # Level 3: Sparse completion bonus
+        if np.all(self.collected == 1):
+            efficiency = (MAX_STEPS - self.steps) / MAX_STEPS
+            battery_bonus = self.battery_level / 100.0
+            reward += COMPLETION_BASE_BONUS * (1 + efficiency + battery_bonus)
+        return reward
 
     def is_done(self):
         return np.all(self.collected == 1) or self.steps >= self.max_steps

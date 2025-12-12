@@ -1,12 +1,12 @@
 GRID_SIZE = (20, 20)     # Lưới
 GAMMA = 0.99           
-EPSILON = 0.9           # Increased initial exploration
-EPSILON_MIN = 0.1      
-EPSILON_DECAY = 0.997   
-BATCH_SIZE = 128         
-LEARNING_RATE = 0.001  
-EPISODES = 800        # Increased for better convergence
-MAX_STEPS = 400         # Reduced to encourage efficiency
+EPSILON = 1.0           # Start với max exploration
+EPSILON_MIN = 0.05      
+EPSILON_DECAY = 0.998   
+BATCH_SIZE = 64         
+LEARNING_RATE = 0.0001  
+EPISODES = 1500        # More episodes với randomization
+MAX_STEPS = 300         # Reduce để encourage efficiency
 ACTIONS = ["left", "right", "forward", "backward", "hover"]
 SEED = 42
 NUM_CONNECTIONS = 5
@@ -38,3 +38,14 @@ MOVE_BASE_COST = 0.01           # Cost per movement action
 HOVER_COST = 0.08               # Battery cost replaced/augmented if desired
 HOVER_FAIL_PENALTY = 0.3        # Penalty when hover fails to collect
 THROUGHPUT_DEGRADATION_PENALTY = 0.25  # Penalty when avg SINR worsens beyond tolerance
+
+# Soft update parameter for target network (if used)
+TAU = 0.005
+
+# Curriculum learning: number of connections by episode range
+CURRICULUM_SCHEDULE = {
+	0: 2,      # Episodes 0-199: 2 connections
+	200: 3,    # Episodes 200-399: 3 connections  
+	400: 4,    # Episodes 400-599: 4 connections
+	600: 5,    # Episodes 600+: 5 connections
+}

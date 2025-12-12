@@ -1,6 +1,8 @@
 """
 Script để train DQN Agent độc lập
 """
+import os
+from datetime import datetime
 import matplotlib.pyplot as plt
 from config import *
 from uav_intercept_env import UAVInterceptEnv
@@ -29,12 +31,19 @@ def train_dqn(episodes=EPISODES):
 
     epsilon = EPSILON
     min_epsilon = 0.05   # allow deeper exploitation phase
-    decay = 0.995        # decay applied each episode
+    decay = EPSILON_DECAY        # decay applied each episode
 
     # For component logging
     component_keys = ['move','throughput_gain','throughput_loss','hover_success','hover_fail','completion','failure_penalty','battery_penalty']
     component_history = {k: [] for k in component_keys}
     for ep in range(episodes):
+        # Apply curriculum: adjust number of connections by episode
+        # Find the largest key <= ep in schedule
+        applicable_keys = [k for k in CURRICULUM_SCHEDULE.keys() if ep >= k]
+        if applicable_keys:
+            key = max(applicable_keys)
+            env.num_connections = CURRICULUM_SCHEDULE[key]
+        # Reset with possibly new number of connections; map regenerates if randomize=True
         state = env.reset()
         total_reward = 0
         agent.epsilon = epsilon
@@ -125,6 +134,10 @@ def train_dqn(episodes=EPISODES):
                        f"Efficiency: {recent_efficiency:.2f}, Length: {recent_length:.1f}")
                 break
 
+    # Ensure plots directory exists
+    os.makedirs('plots', exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
     # Plotting
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
 
@@ -156,7 +169,14 @@ def train_dqn(episodes=EPISODES):
     ax4.grid(True)
 
     plt.tight_layout()
-    plt.show()
+    # Always save summary figure
+    summary_path = os.path.join('plots', f'training_summary_{timestamp}.png')
+    fig.savefig(summary_path, dpi=150)
+    # Try to show if a GUI backend is available
+    try:
+        plt.show()
+    except Exception:
+        pass
 
     # Final statistics
     print("\n=== DQN TRAINING COMPLETED ===")
@@ -170,7 +190,7 @@ def train_dqn(episodes=EPISODES):
 
     # Plot best trajectory
     if best_trajectory is not None:
-        plt.figure(figsize=(8, 8))
+        fig2 = plt.figure(figsize=(8, 8))
         su_nodes = np.array(env.su_nodes)
         du_nodes = np.array(env.du_nodes)
 
@@ -190,7 +210,13 @@ def train_dqn(episodes=EPISODES):
         plt.ylabel("Y Position")
         plt.legend()
         plt.grid(True)
-        plt.show()
+        # Save best trajectory figure
+        best_path = os.path.join('plots', f'best_trajectory_{timestamp}.png')
+        fig2.savefig(best_path, dpi=150)
+        try:
+            plt.show()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     train_dqn()
