@@ -28,13 +28,15 @@ def train_dqn(episodes=EPISODES):
     best_reward = -float('inf')
     best_trajectory = None
     best_connections = None
+    best_su_nodes = None
+    best_du_nodes = None
 
     epsilon = EPSILON
     min_epsilon = 0.05   # allow deeper exploitation phase
     decay = EPSILON_DECAY        # decay applied each episode
 
     # For component logging
-    component_keys = ['move','throughput_gain','throughput_loss','hover_success','hover_fail','completion','failure_penalty','battery_penalty']
+    component_keys = ['move','collection','potential','completion']
     component_history = {k: [] for k in component_keys}
     for ep in range(episodes):
         # Apply curriculum: adjust number of connections by episode
@@ -105,6 +107,9 @@ def train_dqn(episodes=EPISODES):
             best_reward = total_reward
             best_trajectory = env.get_trajectory().copy()
             best_connections = env.get_connections().copy()
+            # Save SU and DU nodes corresponding to this best episode
+            best_su_nodes = [np.array(su) for su, _ in env.connections]
+            best_du_nodes = [np.array(du) for _, du in env.connections]
 
         # Logging
         if (ep + 1) % 50 == 0 or total_reward > 0:
@@ -189,10 +194,10 @@ def train_dqn(episodes=EPISODES):
     print(f"Average Final Battery Level: {np.mean(battery_levels):.1f}/100.0")
 
     # Plot best trajectory
-    if best_trajectory is not None:
+    if best_trajectory is not None and best_su_nodes is not None:
         fig2 = plt.figure(figsize=(8, 8))
-        su_nodes = np.array(env.su_nodes)
-        du_nodes = np.array(env.du_nodes)
+        su_nodes = np.array(best_su_nodes)
+        du_nodes = np.array(best_du_nodes)
 
         for conn in best_connections:
             x = [conn[0], conn[2]]

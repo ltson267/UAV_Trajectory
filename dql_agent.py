@@ -114,8 +114,8 @@ class DQNAgent:
 
         states, actions, rewards, next_states, dones, indices, is_weights = self.memory.sample(self.batch_size)
 
-        # Simple fixed clipping (remove running normalization to reduce drift)
-        norm_rewards = np.clip(rewards, -5.0, 5.0)
+        # Clip rewards for stability
+        norm_rewards = np.clip(rewards, -10.0, 10.0)
 
         # Double DQN: Use main network to select actions, target network to evaluate
         # Get best actions from main network
@@ -126,18 +126,17 @@ class DQNAgent:
         target_q_values = self.sess.run(self.target_q_values, {self.states: next_states})
         current_q_values = self.sess.run(self.q_values, {self.states: states})
 
-        # Compute target Q-values using Double DQN
+        # Compute target Q-values using Double DQN and TD errors BEFORE training
         targets = current_q_values.copy()
-        for i in range(self.batch_size):
-            if dones[i]:
-                targets[i, actions[i]] = norm_rewards[i]
-            else:
-                targets[i, actions[i]] = norm_rewards[i] + self.gamma * target_q_values[i, best_actions[i]]
-
-        # Compute TD errors for PER priority updates
         td_errors = []
         for i in range(self.batch_size):
-            td_errors.append(targets[i, actions[i]] - self.sess.run(self.q_values, {self.states: states[i:i+1]})[0, actions[i]])
+            if dones[i]:
+                target_val = norm_rewards[i]
+            else:
+                target_val = norm_rewards[i] + self.gamma * target_q_values[i, best_actions[i]]
+            targets[i, actions[i]] = target_val
+            # Compute TD error for PER priority update
+            td_errors.append(target_val - current_q_values[i, actions[i]])
         td_errors = np.array(td_errors)
 
         # Train the main network with Huber loss and gradient clipping
